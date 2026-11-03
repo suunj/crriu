@@ -672,6 +672,7 @@ set(RR_SOURCES
   src/ReplayTask.cc
   src/ReplayTimeline.cc
   src/RerunCommand.cc
+  src/DetachCommand.cc
   src/ReturnAddressList.cc
   src/RmCommand.cc
   src/Scheduler.cc
