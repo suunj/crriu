@@ -1,4 +1,4 @@
-[submodule "third_party/criu"]
-	path = third_party/criu
+[submodule "third-party/criu"]
+	path = third-party/criu
 	url = https://github.com/suunj/criu.git
 	branch = crriu

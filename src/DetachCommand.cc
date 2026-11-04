@@ -41,6 +41,7 @@ DetachCommand DetachCommand::singleton(
 
 struct DetachFlags {
   FrameTime event;
+  string cwd;
   DetachFlags() : event(0) {}
 };
 
@@ -49,6 +50,7 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
     return true;
   }
   static const OptionSpec options[] = {
+    { 'c', "cwd", HAS_PARAMETER },
     { 'e', "event", HAS_PARAMETER },
   };
   ParsedOption opt;
@@ -56,6 +58,9 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
     return false;
   }
   switch (opt.short_name) {
+    case 'c':
+      flags.cwd = opt.value;
+      break;
     case 'e':
       if (!opt.verify_valid_int(1, INT64_MAX)) {
         return false;
@@ -74,20 +79,26 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
       ReplaySession::create(trace_dir, session_flags);
 
   //FdModel model(session->trace_reader().initial_cwd());
-  char cwd_link[64];
-  snprintf(cwd_link, sizeof(cwd_link),
-           "/proc/%d/cwd", session->current_task()->tid);
-
-  char cwd_buf[PATH_MAX];
-  ssize_t n = readlink(cwd_link, cwd_buf, sizeof(cwd_buf) - 1);
-
-  if (n < 0) {
-    fprintf(stderr, "rr detach: failed to read tracee cwd: %s\n",
-            strerror(errno));
+  string cwd = flags.cwd;
+  if (!cwd.empty() && cwd[0] != '/') {
+    fprintf(stderr,
+            "rr detach: --cwd requires an absolute path\n");
     return 1;
-  }
+ }
 
-  FdModel model(string(cwd_buf, n));
+  if (cwd.empty()) {
+    char link[64], buf[PATH_MAX];
+    snprintf(link, sizeof link, "/proc/%d/cwd", session->current_task()->tid);
+    ssize_t n = readlink(link, buf, sizeof buf - 1);
+
+    if (n < 0) {
+      fprintf(stderr, "rr detach: can't read tracee cwd: %s\n", strerror(errno)); return 1;
+    }
+    cwd.assign(buf, n);
+    fprintf(stderr, "rr detach: assuming recording cwd %s; pass --cwd if different\n", cwd.c_str());
+  }
+  FdModel model(cwd);
+
   // 1. Replay until event `flags.event` has been fully replayed, i.e. the
   //    trace reader has moved past it.
   while (session->trace_reader().time() <= flags.event) {
@@ -177,9 +188,9 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     return 1;
   }
 
-  // 3b. Recreate the tracee's own fds (replay never opened them for real).
+  // Reconstruct the tracee's modeled file descriptors before detach.
   for (Task* t : tasks) {
-    if (!model.materialize(t)) {
+    if (!model.apply_cwd(t) || !model.materialize(t)) {
       fprintf(stderr, "rr detach: failed to recreate fds\n");
       return 1;
     }

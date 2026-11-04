@@ -41,6 +41,9 @@ public:
    */
   bool materialize(Task* t);
 
+  /** Set the tracee's cwd to the modelled one (initial + observed chdirs). */
+  bool apply_cwd(Task* t);
+
   const std::map<int, OpenFilePtr>& fds() const { return table; }
 
 private:

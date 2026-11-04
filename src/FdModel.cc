@@ -40,7 +40,9 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
     return;
 
   SupportedArch arch = sc.arch();
+
   const Registers& r = frame.regs();
+
   int no = sc.number;
   long ret = r.syscall_result_signed();
   long a0 = r.arg1_signed(), a1 = r.arg2_signed(), a2 = r.arg3_signed();
@@ -51,7 +53,7 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
     auto f = make_shared<OpenFile>();
     f->path = resolve(t, (int)a0, (uintptr_t)a1);
     f->flags = (int)a2;
-    f->offset = (f->flags & O_APPEND) ? -1 : 0;   // -1: let kernel place at end
+    f->offset = 0;
     table[(int)ret] = f;
   } else if (no == syscall_number_for_open(arch)) {
     if (ret < 0)
@@ -60,7 +62,7 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
 
     f->path = resolve(t, AT_FDCWD, (uintptr_t)a0);
     f->flags = (int)a1;
-    f->offset = (f->flags & O_APPEND) ? -1 : 0;
+    f->offset = 0;
 
     table[(int)ret] = f;
   } else if (no == syscall_number_for_close(arch)) {
@@ -88,10 +90,20 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
   } else if (no == syscall_number_for_lseek(arch)) {
     if (ret >= 0 && table.count((int)a0))
       table[(int)a0]->offset = ret;
-  } else if (no == syscall_number_for_read(arch) ||
-             no == syscall_number_for_write(arch)) {
-    if (ret > 0 && table.count((int)a0) && table[(int)a0]->offset >= 0)
+  } else if (no == syscall_number_for_read(arch)) {
+    if (ret > 0 && table.count((int)a0) &&
+      table[(int)a0]->offset >= 0)
       table[(int)a0]->offset += ret;
+
+  } else if (no == syscall_number_for_write(arch)) {
+    if (ret > 0 && table.count((int)a0)) {
+      auto& f = table[(int)a0];
+
+      if (f->flags & O_APPEND)
+        f->offset = -1;
+      else if (f->offset >= 0)
+        f->offset += ret;
+    }
   } else if (no == syscall_number_for_chdir(arch)) {
     if (ret == 0) cwd = resolve(t, AT_FDCWD, (uintptr_t)a0);
   }
@@ -102,6 +114,18 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
 bool FdModel::materialize(Task* t) {
   if (table.empty())
     return true;
+
+  // Validate offsets before modifying the tracee's FD table.
+  for (const auto& entry : table) {
+    int fd = entry.first;
+    const auto& file = entry.second;
+
+    if (file->offset < 0) {
+      LOG(error) << "Cannot restore fd " << fd
+        << ": file offset is unknown";
+      return false;
+    }
+  }
 
   SupportedArch arch = t->arch();
   AutoRemoteSyscalls remote(t);
@@ -178,7 +202,7 @@ bool FdModel::materialize(Task* t) {
         tmp, f->offset, SEEK_SET);
 
       if (pos != f->offset) {
-        LOG(error) << "lseek(" << tmp << ") -> " << pos;
+        LOG(error) << "lseek failed: " << pos;
         ok = false;
         break;
       }
@@ -209,6 +233,23 @@ bool FdModel::materialize(Task* t) {
   close_temp_fds();
 
   return ok;
+}
+
+bool FdModel::apply_cwd(Task* t) {
+  SupportedArch arch = t->arch();
+  AutoRemoteSyscalls remote(t);
+  AutoRestoreMem path_mem(remote, cwd.c_str());
+
+  long ret = remote.syscall(
+      syscall_number_for_chdir(arch),
+      path_mem.get().as_int());
+
+  if (ret < 0) {
+    LOG(error) << "chdir(" << cwd << ") -> " << ret;
+    return false;
+  }
+
+  return true;
 }
 
 } // namespace rr
