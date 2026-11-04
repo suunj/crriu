@@ -10,6 +10,7 @@
 
 #include "AutoRemoteSyscalls.h"
 #include "Command.h"
+#include "FdModel.h"
 #include "FdTable.h"
 #include "ReplaySession.h"
 #include "ReplayTask.h"
@@ -72,6 +73,21 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   ReplaySession::shr_ptr session =
       ReplaySession::create(trace_dir, session_flags);
 
+  //FdModel model(session->trace_reader().initial_cwd());
+  char cwd_link[64];
+  snprintf(cwd_link, sizeof(cwd_link),
+           "/proc/%d/cwd", session->current_task()->tid);
+
+  char cwd_buf[PATH_MAX];
+  ssize_t n = readlink(cwd_link, cwd_buf, sizeof(cwd_buf) - 1);
+
+  if (n < 0) {
+    fprintf(stderr, "rr detach: failed to read tracee cwd: %s\n",
+            strerror(errno));
+    return 1;
+  }
+
+  FdModel model(string(cwd_buf, n));
   // 1. Replay until event `flags.event` has been fully replayed, i.e. the
   //    trace reader has moved past it.
   while (session->trace_reader().time() <= flags.event) {
@@ -81,7 +97,15 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
               (long long)flags.event);
       return 1;
     }
+    Task* cur = session->current_task();
+    if (cur)
+      model.observe(session->current_trace_frame(), cur);
   }
+
+  // 모델 덤프 (검증용)
+  for (auto& kv : model.fds())
+    fprintf(stderr, "fd %d -> %s flags=%#x off=%lld\n", kv.first,
+            kv.second->path.c_str(), kv.second->flags, (long long)kv.second->offset);
 
   // 2. Collect tasks.
   vector<Task*> tasks;
@@ -151,6 +175,15 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
             "rr detach: %d rr fd(s) could not be closed\n",
             close_failures);
     return 1;
+  }
+
+  // 3b. Recreate the tracee's own fds (replay never opened them for real).
+  for (Task* t : tasks) {
+    if (!model.materialize(t)) {
+      fprintf(stderr, "rr detach: failed to recreate fds\n");
+      return 1;
+    }
+    break;   // one shared fd table for now; TODO per-FdTable like step 3
   }
 
   // 4. Restore registers and detach all tasks.
