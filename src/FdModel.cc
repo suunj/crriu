@@ -122,6 +122,14 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
       f->type = OpenFile::EVENTFD; f->flags = (int)a1; f->counter = (unsigned)a0;
       table[(int)ret] = f;
     }
+  } else if (no == syscall_number_for_signalfd4(arch)) {
+    if (ret >= 0 && (int)a0 == -1) {       // a0 != -1 modifies an existing fd
+      auto f = make_shared<OpenFile>();
+      f->type = OpenFile::SIGNALFD;
+      f->sigmask = t->read_mem(remote_ptr<uint64_t>(a1));
+      f->flags = (int)r.arg4_signed();
+      table[(int)ret] = f;
+    }
   }
   // TODO: fcntl(F_DUPFD*), pread/pwrite (no offset change), readv/writev,
   //       openat2, pipe/socket (kind != regular file), fchdir.
@@ -178,6 +186,10 @@ bool FdModel::materialize(Task* t) {
     if (f->type == OpenFile::EVENTFD) {
       r = remote.syscall(syscall_number_for_eventfd2(arch),
                          (unsigned)f->counter, f->flags);
+    } else if (f->type == OpenFile::SIGNALFD) {
+      AutoRestoreMem mask(remote, &f->sigmask, sizeof(f->sigmask));
+      r = remote.syscall(syscall_number_for_signalfd4(arch), -1,
+                         mask.get().as_int(), sizeof(f->sigmask), f->flags);
     } else {
       AutoRestoreMem path_mem(remote, f->path.c_str());
       r = remote.syscall(openat_nr, AT_FDCWD, path_mem.get().as_int(),

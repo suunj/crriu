@@ -674,6 +674,7 @@ set(RR_SOURCES
   src/RerunCommand.cc
   src/DetachCommand.cc
   src/FdModel.cc
+  src/SignalModel.cc
   src/ReturnAddressList.cc
   src/RmCommand.cc
   src/Scheduler.cc

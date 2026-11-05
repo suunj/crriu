@@ -12,6 +12,7 @@
 #include "Command.h"
 #include "FdModel.h"
 #include "FdTable.h"
+#include "SignalModel.h"
 #include "ReplaySession.h"
 #include "ReplayTask.h"
 #include "rr/rr.h"
@@ -99,6 +100,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     fprintf(stderr, "rr detach: assuming recording cwd %s; pass --cwd if different\n", cwd.c_str());
   }
   FdModel model(cwd);
+  SignalModel sigs;
 
   // 1. Replay until event `flags.event` has been fully replayed, i.e. the
   //    trace reader has moved past it.
@@ -110,8 +112,10 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
       return 1;
     }
     Task* cur = session->current_task();
-    if (cur)
+    if (cur) {
       model.observe(session->current_trace_frame(), cur);
+      sigs.observe(session->current_trace_frame(), cur);
+    }
   }
 
   // 모델 덤프 (검증용)
@@ -189,13 +193,16 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     return 1;
   }
 
-  // Reconstruct the tracee's modeled file descriptors before detach.
+  // Reconstruct kernel state replay never created: fds/cwd (shared), per-thread signal masks, handler table.
+  if (!model.apply_cwd(tasks[0]) || !model.materialize(tasks[0])) {
+    fprintf(stderr, "rr detach: failed to recreate fds\n");
+    return 1;
+  }
   for (Task* t : tasks) {
-    if (!model.apply_cwd(t) || !model.materialize(t)) {
-      fprintf(stderr, "rr detach: failed to recreate fds\n");
+    if (!sigs.materialize(t)) {
+      fprintf(stderr, "rr detach: failed to restore signal state\n");
       return 1;
     }
-    break;   // one shared fd table for now; TODO per-FdTable like step 3
   }
 
   // 4. Restore registers and detach all tasks.
