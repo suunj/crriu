@@ -75,6 +75,7 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
 
 static int detach(const string& trace_dir, const DetachFlags& flags) {
   ReplaySession::Flags session_flags;
+  session_flags.preserve_thread_groups = true;
   ReplaySession::shr_ptr session =
       ReplaySession::create(trace_dir, session_flags);
 
@@ -216,7 +217,10 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     fprintf(stderr, "tid %d flush=%d ip=%p\n",
             t->tid, flushed,
             (void*)t->ip().register_value());
+  }
 
+  // 4b. Release all tasks, stopped.
+  for (Task* t : tasks) {
     errno = 0;
     long r = t->fallible_ptrace(
         PTRACE_DETACH, nullptr, (void*)(uintptr_t)SIGSTOP);

@@ -247,7 +247,8 @@ public:
       , replay_stops_at_first_execve(false)
       , cpu_unbound(false)
       , transient_errors_fatal(false)
-      , intel_pt_start_checking_event(-1) {}
+      , intel_pt_start_checking_event(-1)
+      , preserve_thread_groups(false) {}
     Flags(const Flags&) = default;
     bool redirect_stdio;
     std::string redirect_stdio_file;
@@ -256,6 +257,7 @@ public:
     bool cpu_unbound;
     bool transient_errors_fatal;
     FrameTime intel_pt_start_checking_event;
+    bool preserve_thread_groups;
   };
 
   /**

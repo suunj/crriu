@@ -193,8 +193,10 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
         CLONE_VFORK |
         CLONE_NEWIPC | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUSER |
         CLONE_NEWUTS | CLONE_NEWCGROUP |
-        CLONE_THREAD | CLONE_FILES |
         CLONE_PIDFD | CLONE_CHILD_SETTID | CLONE_PARENT_SETTID;
+    if (!t->session().as_replay()->flags().preserve_thread_groups) {
+      disallowed_clone_flags |= CLONE_THREAD | CLONE_FILES;
+    }
     flags = r.arg1();
     r.set_arg1(flags & ~disallowed_clone_flags);
   } else if (Arch::vfork == sys) {
