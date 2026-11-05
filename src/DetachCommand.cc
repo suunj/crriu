@@ -206,6 +206,14 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     // parked in a syscall-entry stop; clearing orig_rax stops the kernel
     // from treating the detach as a syscall return (which would clobber rax).
     Registers regs = t->regs();
+    if (regs.syscall_result_signed() == -ENOSYS && regs.original_syscallno() >= 0) {
+
+      regs.set_syscall_result(regs.original_syscallno());
+      regs.set_ip(regs.ip() - 2);   // x86-64 `syscall` is 2 bytes
+
+      fprintf(stderr, "tid %d: rewound to re-execute syscall %ld\n",
+              t->tid, (long)regs.original_syscallno());
+    }
     regs.set_original_syscallno(-1);
     t->set_regs(regs);
 
