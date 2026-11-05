@@ -26,9 +26,22 @@ public:
   struct OpenFile;
   using OpenFilePtr = std::shared_ptr<OpenFile>;
 
-  struct EpollMember {
-    int registered_fd;
+  struct EpollKey {
+    int fd;
     OpenFilePtr file;
+  };
+
+  struct EpollKeyLess {
+    bool operator()(const EpollKey& a,
+                    const EpollKey& b) const {
+      if (a.fd != b.fd)
+        return a.fd < b.fd;
+
+      return std::owner_less<OpenFilePtr>()(a.file, b.file);
+    }
+  };
+
+  struct EpollMember {
     uint32_t events;
     uint64_t data;
   };
@@ -48,7 +61,7 @@ public:
     uint64_t counter = 0;  // EVENTFD
     uint64_t sigmask = 0;  // SIGNALFD
 
-    std::map<int, EpollMember> epoll_members;
+    std::map<EpollKey, EpollMember, EpollKeyLess> epoll_members;
   };
 
   explicit FdModel(const std::string& initial_cwd) : cwd(initial_cwd) {}

@@ -99,7 +99,7 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
             continue;
 
           for (auto it = ep->epoll_members.begin(); it != ep->epoll_members.end();) {
-            if (it->second.file == file)
+            if (it->first.file == file)
               it = ep->epoll_members.erase(it);
             else
               ++it;
@@ -186,9 +186,8 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
             t->read_mem(remote_ptr<uint64_t>(r.arg4() + 4));
 
 
-          ep->epoll_members[fd] = {
-            fd, table[fd], events, data
-          };
+          ep->epoll_members[{fd, table[fd]}] = {events, data};
+
           break;
         }
 
@@ -202,7 +201,7 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
           uint64_t data =
             t->read_mem(remote_ptr<uint64_t>(r.arg4() + 4));
 
-          auto it = ep->epoll_members.find(fd);
+          auto it = ep->epoll_members.find({fd, table[fd]});
           if (it == ep->epoll_members.end()) {
             LOG(error) << "MOD on unknown epoll membership";
             break;
@@ -212,9 +211,14 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
           it->second.data = data;
           break;
         }
-        case EPOLL_CTL_DEL:
-          ep->epoll_members.erase(fd);
+        case EPOLL_CTL_DEL: {
+          auto it = table.find(fd);
+          if (it == table.end())
+            break;
+
+          ep->epoll_members.erase({fd, it->second});
           break;
+        }
       }
     }
   }
@@ -370,15 +374,26 @@ bool FdModel::materialize(Task* t) {
     if (!restored_epolls.insert(f).second)
       continue;
 
+    LOG(error) << "epoll fd=" << kv.first
+           << " members=" << f->epoll_members.size();
+
     for (const auto& m : f->epoll_members) {
+      const EpollKey& key = m.first;
+
+      LOG(error) << "registered_fd=" << key.fd
+        << " file=" << key.file.get()
+        << " data=" << m.second.data;
+    }
+    for (const auto& m : f->epoll_members) {
+      const EpollKey& key = m.first;
       const EpollMember& member = m.second;
 
       // The registered fd must still refer to the original file.
-      auto it = table.find(member.registered_fd);
+      auto it = table.find(key.fd);
 
-      if (it == table.end() || it->second != member.file) {
+      if (it == table.end() || it->second != key.file) {
         LOG(error) << "Cannot restore epoll membership: fd "
-          << member.registered_fd
+          << key.fd
           << " no longer refers to the registered file";
         ok = false;
         continue;
@@ -398,12 +413,12 @@ bool FdModel::materialize(Task* t) {
         syscall_number_for_epoll_ctl(arch),
         kv.first,
         EPOLL_CTL_ADD,
-        member.registered_fd,
+        key.fd,
         evmem.get().as_int());
 
       if (r != 0) {
         LOG(error) << "epoll_ctl(" << kv.first
-          << ", ADD, " << member.registered_fd
+          << ", ADD, " << key.fd
           << ") -> " << r;
         ok = false;
       }
