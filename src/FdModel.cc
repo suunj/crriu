@@ -7,6 +7,7 @@
 #include <limits>
 #include <set>
 #include <sys/eventfd.h>
+#include <sys/epoll.h>
 
 #include "AutoRemoteSyscalls.h"
 #include "Event.h"
@@ -71,8 +72,41 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
 
     table[(int)ret] = f;
   } else if (no == syscall_number_for_close(arch)) {
-    if (ret == 0)
+    if (ret == 0 && table.count((int)a0)) {
+      auto file = table[(int)a0];
+
       table.erase((int)a0);
+
+      bool still_open = false;
+
+      for (const auto& kv : table) {
+        if (kv.second == file) {
+          still_open = true;
+          break;
+        }
+      }
+
+      if (!still_open) {
+        std::set<OpenFile*> visited;
+
+        for (auto& kv : table) {
+          OpenFile* ep = kv.second.get();
+
+          if (!visited.insert(ep).second)
+            continue;
+
+          if (ep->type != OpenFile::EPOLL)
+            continue;
+
+          for (auto it = ep->epoll_members.begin(); it != ep->epoll_members.end();) {
+            if (it->second.file == file)
+              it = ep->epoll_members.erase(it);
+            else
+              ++it;
+          }
+        }
+      }
+    }
   } else if (no == syscall_number_for_dup(arch)) {
     if (ret >= 0 && table.count((int)a0))
       table[(int)ret] = table[(int)a0];
@@ -129,6 +163,59 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
       f->sigmask = t->read_mem(remote_ptr<uint64_t>(a1));
       f->flags = (int)r.arg4_signed();
       table[(int)ret] = f;
+    }
+  } else if (no == syscall_number_for_epoll_create1(arch)) {
+    if (ret >= 0) {
+      auto f = make_shared<OpenFile>();
+      f->type = OpenFile::EPOLL; f->flags = (int)a0;
+      table[(int)ret] = f;
+    }
+  } else if (no == syscall_number_for_epoll_ctl(arch)) {
+    if (ret == 0 && table.count((int)a0)) {
+      auto& ep = table[(int)a0];
+      int fd = (int)a2;
+      switch ((int)a1) {
+        case EPOLL_CTL_ADD: {
+          if (!table.count(fd))
+            break;
+
+          uint32_t events =
+            t->read_mem(remote_ptr<uint32_t>(r.arg4()));
+
+          uint64_t data =
+            t->read_mem(remote_ptr<uint64_t>(r.arg4() + 4));
+
+
+          ep->epoll_members[fd] = {
+            fd, table[fd], events, data
+          };
+          break;
+        }
+
+        case EPOLL_CTL_MOD: {
+          if (!table.count(fd))
+            break;
+
+          uint32_t events =
+            t->read_mem(remote_ptr<uint32_t>(r.arg4()));
+
+          uint64_t data =
+            t->read_mem(remote_ptr<uint64_t>(r.arg4() + 4));
+
+          auto it = ep->epoll_members.find(fd);
+          if (it == ep->epoll_members.end()) {
+            LOG(error) << "MOD on unknown epoll membership";
+            break;
+          }
+
+          it->second.events = events;
+          it->second.data = data;
+          break;
+        }
+        case EPOLL_CTL_DEL:
+          ep->epoll_members.erase(fd);
+          break;
+      }
     }
   }
   // TODO: fcntl(F_DUPFD*), pread/pwrite (no offset change), readv/writev,
@@ -190,6 +277,8 @@ bool FdModel::materialize(Task* t) {
       AutoRestoreMem mask(remote, &f->sigmask, sizeof(f->sigmask));
       r = remote.syscall(syscall_number_for_signalfd4(arch), -1,
                          mask.get().as_int(), sizeof(f->sigmask), f->flags);
+    } else if (f->type == OpenFile::EPOLL) {
+      r = remote.syscall(syscall_number_for_epoll_create1(arch), f->flags);
     } else {
       AutoRestoreMem path_mem(remote, f->path.c_str());
       r = remote.syscall(openat_nr, AT_FDCWD, path_mem.get().as_int(),
@@ -268,6 +357,58 @@ bool FdModel::materialize(Task* t) {
     }
   }
 
+  // Phase 2.5: epoll memberships, now that every target fd exists.
+  std::set<OpenFile*> restored_epolls;
+
+  for (const auto& kv : table) {
+    OpenFile* f = kv.second.get();
+
+    if (f->type != OpenFile::EPOLL)
+      continue;
+
+    // Multiple fds may refer to the same epoll instance.
+    if (!restored_epolls.insert(f).second)
+      continue;
+
+    for (const auto& m : f->epoll_members) {
+      const EpollMember& member = m.second;
+
+      // The registered fd must still refer to the original file.
+      auto it = table.find(member.registered_fd);
+
+      if (it == table.end() || it->second != member.file) {
+        LOG(error) << "Cannot restore epoll membership: fd "
+          << member.registered_fd
+          << " no longer refers to the registered file";
+        ok = false;
+        continue;
+      }
+
+      struct {
+        uint32_t events;
+        uint64_t data;
+      } __attribute__((packed)) ev = {
+        member.events,
+        member.data
+      };
+
+      AutoRestoreMem evmem(remote, &ev, sizeof(ev));
+
+      long r = remote.syscall(
+        syscall_number_for_epoll_ctl(arch),
+        kv.first,
+        EPOLL_CTL_ADD,
+        member.registered_fd,
+        evmem.get().as_int());
+
+      if (r != 0) {
+        LOG(error) << "epoll_ctl(" << kv.first
+          << ", ADD, " << member.registered_fd
+          << ") -> " << r;
+        ok = false;
+      }
+    }
+  }
   // Phase 3: Release temporary descriptors.
   close_temp_fds();
 

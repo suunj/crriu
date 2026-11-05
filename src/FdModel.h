@@ -23,8 +23,23 @@ class TraceFrame;
  */
 class FdModel {
 public:
+  struct OpenFile;
+  using OpenFilePtr = std::shared_ptr<OpenFile>;
+
+  struct EpollMember {
+    int registered_fd;
+    OpenFilePtr file;
+    uint32_t events;
+    uint64_t data;
+  };
+
   struct OpenFile {
-    enum Type { REGULAR, EVENTFD, SIGNALFD };
+    enum Type {
+      REGULAR,
+      EVENTFD,
+      SIGNALFD,
+      EPOLL
+    };
     Type type = REGULAR;
 
     std::string path;   // absolute
@@ -32,8 +47,9 @@ public:
     int64_t offset = 0;
     uint64_t counter = 0;  // EVENTFD
     uint64_t sigmask = 0;  // SIGNALFD
+
+    std::map<int, EpollMember> epoll_members;
   };
-  typedef std::shared_ptr<OpenFile> OpenFilePtr;
 
   explicit FdModel(const std::string& initial_cwd) : cwd(initial_cwd) {}
 
