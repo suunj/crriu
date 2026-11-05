@@ -24,9 +24,13 @@ class TraceFrame;
 class FdModel {
 public:
   struct OpenFile {
+    enum Type { REGULAR, EVENTFD };
+    Type type = REGULAR;
+
     std::string path;   // absolute
-    int flags;          // as passed to open
-    int64_t offset;
+    int flags = 0;          // as passed to open
+    int64_t offset = 0;
+    uint64_t counter = 0;  // EVENTFD
   };
   typedef std::shared_ptr<OpenFile> OpenFilePtr;
 
@@ -51,6 +55,7 @@ private:
 
   std::string cwd;
   std::map<int, OpenFilePtr> table;
+  int64_t last_time = 0;
 };
 
 } // namespace rr

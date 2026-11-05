@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <limits>
 #include <set>
+#include <sys/eventfd.h>
 
 #include "AutoRemoteSyscalls.h"
 #include "Event.h"
@@ -32,6 +33,10 @@ string FdModel::resolve(Task* t, int dirfd, uintptr_t path_ptr) {
 }
 
 void FdModel::observe(const TraceFrame& frame, Task* t) {
+  if (frame.time() == last_time)
+    return;   // replay_step can report the same frame twice
+  last_time = frame.time();
+
   const Event& ev = frame.event();
   if (!ev.is_syscall_event())
     return;
@@ -88,24 +93,35 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
       }
     }
   } else if (no == syscall_number_for_lseek(arch)) {
-    if (ret >= 0 && table.count((int)a0))
-      table[(int)a0]->offset = ret;
+      if (ret >= 0 && table.count((int)a0))
+        table[(int)a0]->offset = ret;
   } else if (no == syscall_number_for_read(arch)) {
-    if (ret > 0 && table.count((int)a0) &&
-      table[(int)a0]->offset >= 0)
-      table[(int)a0]->offset += ret;
-
-  } else if (no == syscall_number_for_write(arch)) {
     if (ret > 0 && table.count((int)a0)) {
       auto& f = table[(int)a0];
-
-      if (f->flags & O_APPEND)
-        f->offset = -1;
+      if (f->type == OpenFile::EVENTFD)
+        f->counter = (f->flags & EFD_SEMAPHORE) ? f->counter - 1 : 0;
       else if (f->offset >= 0)
         f->offset += ret;
     }
+  } else if (no == syscall_number_for_write(arch)) {
+    if (ret > 0 && table.count((int)a0)) {
+      auto& f = table[(int)a0];
+      if (f->type == OpenFile::EVENTFD) {
+        f->counter += t->read_mem(remote_ptr<uint64_t>(a1));
+      } else if (f->flags & O_APPEND) {
+        f->offset = -1;
+      } else if (f->offset >= 0) {
+        f->offset += ret;
+      }
+    }
   } else if (no == syscall_number_for_chdir(arch)) {
     if (ret == 0) cwd = resolve(t, AT_FDCWD, (uintptr_t)a0);
+  } else if (no == syscall_number_for_eventfd2(arch)) {
+    if (ret >= 0) {
+      auto f = make_shared<OpenFile>();
+      f->type = OpenFile::EVENTFD; f->flags = (int)a1; f->counter = (unsigned)a0;
+      table[(int)ret] = f;
+    }
   }
   // TODO: fcntl(F_DUPFD*), pread/pwrite (no offset change), readv/writev,
   //       openat2, pipe/socket (kind != regular file), fchdir.
@@ -158,14 +174,15 @@ bool FdModel::materialize(Task* t) {
     if (temporary.count(f))
       continue;
 
-    AutoRestoreMem path_mem(remote, f->path.c_str());
-
-    long r = remote.syscall(
-      openat_nr,
-      AT_FDCWD,
-      path_mem.get().as_int(),
-      f->flags & ~(O_CREAT | O_TRUNC | O_EXCL),
-      0);
+    long r;
+    if (f->type == OpenFile::EVENTFD) {
+      r = remote.syscall(syscall_number_for_eventfd2(arch),
+                         (unsigned)f->counter, f->flags);
+    } else {
+      AutoRestoreMem path_mem(remote, f->path.c_str());
+      r = remote.syscall(openat_nr, AT_FDCWD, path_mem.get().as_int(),
+                         f->flags & ~(O_CREAT | O_TRUNC | O_EXCL), 0);
+    }
 
     if (r < 0) {
       LOG(error) << "openat(" << f->path << ") -> " << r;
