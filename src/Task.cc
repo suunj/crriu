@@ -3908,6 +3908,10 @@ long Task::ptrace_seize(pid_t tid, Session& session) {
   SeccompFilter<struct sock_filter> filter = create_seccomp_filter();
   struct sock_fprog prog = {(unsigned short)filter.filters.size(),
                             filter.filters.data()};
+  if (session.as_replay() && session.as_replay()->flags().preserve_thread_groups) {
+    // Give the tracee its recorded pid (only effective in a fresh pid ns).
+    reserve_next_pid(rec_tid);
+  }
   do {
     tid = fork();
     // fork() can fail with EAGAIN due to temporary load issues. In such

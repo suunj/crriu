@@ -189,13 +189,12 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
     // CLONE_PARENT/CLONE_PTRACE ... they probably need work to work under rr.
     uintptr_t disallowed_clone_flags =
         CLONE_UNTRACED |
-        CLONE_CHILD_CLEARTID |
         CLONE_VFORK |
         CLONE_NEWIPC | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUSER |
         CLONE_NEWUTS | CLONE_NEWCGROUP |
         CLONE_PIDFD | CLONE_CHILD_SETTID | CLONE_PARENT_SETTID;
     if (!t->session().as_replay()->flags().preserve_thread_groups) {
-      disallowed_clone_flags |= CLONE_THREAD | CLONE_FILES;
+      disallowed_clone_flags |= CLONE_THREAD | CLONE_FILES | CLONE_CHILD_CLEARTID;
     }
     flags = r.arg1();
     r.set_arg1(flags & ~disallowed_clone_flags);
@@ -218,6 +217,12 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
   r.set_ip(r.ip().decrement_by_syscall_insn_length(r.arch()));
   t->set_regs(r);
   Registers entry_regs = r;
+
+  TraceTaskEvent tte = read_task_trace_event(t, TraceTaskEvent::CLONE);
+
+  if (t->session().as_replay()->flags().preserve_thread_groups) {
+    reserve_next_pid(tte.tid());
+  }
 
   // Run; we will be interrupted by PTRACE_EVENT_CLONE/FORK/VFORK.
   bool ok = t->resume_execution(RESUME_CONT, RESUME_WAIT_NO_EXIT, RESUME_NO_TICKS);
@@ -256,7 +261,6 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
   // Dig the recorded tid out of the trace. The tid value returned in
   // the recorded registers could be in a different pid namespace from rr's,
   // so we can't use it directly.
-  TraceTaskEvent tte = read_task_trace_event(t, TraceTaskEvent::CLONE);
   ASSERT(t, tte.parent_tid() == t->rec_tid)
       << "Expected tid " << t->rec_tid << ", got " << tte.parent_tid();
   long rec_tid = tte.tid();

@@ -706,6 +706,8 @@ std::optional<int> read_perf_event_paranoid();
 
 bool virtual_address_size_supported(uint8_t bit_size);
 
+void reserve_next_pid(pid_t want);
+
 } // namespace rr
 
 #endif /* RR_UTIL_H_ */

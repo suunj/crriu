@@ -2778,4 +2778,16 @@ bool virtual_address_size_supported(uint8_t bits) {
   return false;
 }
 
+void reserve_next_pid(pid_t want) {
+  ScopedFd fd("/proc/sys/kernel/ns_last_pid", O_WRONLY);
+  if (!fd.is_open()) {
+    LOG(warn) << "Can't open ns_last_pid; pid " << want << " not reserved";
+    return;
+  }
+  string s = to_string(want - 1);
+  if (write(fd, s.c_str(), s.size()) != (ssize_t)s.size()) {
+    LOG(warn) << "Failed to reserve pid " << want;
+  }
+}
+
 } // namespace rr
