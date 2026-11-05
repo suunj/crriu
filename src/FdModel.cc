@@ -120,9 +120,8 @@ bool FdModel::materialize(Task* t) {
     int fd = entry.first;
     const auto& file = entry.second;
 
-    if (file->offset < 0) {
-      LOG(error) << "Cannot restore fd " << fd
-        << ": file offset is unknown";
+    if (file->offset < 0 && !(file->flags & O_APPEND)) {
+      LOG(error) << "Cannot restore fd " << fd << ": file offset is unknown";
       return false;
     }
   }
@@ -197,15 +196,26 @@ bool FdModel::materialize(Task* t) {
     temp_fds.insert((int)tmp);
 
     if (f->offset >= 0) {
-      long pos = remote.syscall(
-        syscall_number_for_lseek(arch),
-        tmp, f->offset, SEEK_SET);
+      long pos = remote.syscall(syscall_number_for_lseek(arch), tmp, f->offset, SEEK_SET);
 
       if (pos != f->offset) {
         LOG(error) << "lseek failed: " << pos;
         ok = false;
         break;
       }
+    } else if (f->flags & O_APPEND) {
+      long pos = remote.syscall(
+        syscall_number_for_lseek(arch), tmp, 0, SEEK_END);
+
+      if (pos < 0) {
+        LOG(error) << "lseek(SEEK_END) failed: " << pos;
+        ok = false;
+        break;
+      }
+    } else {
+      LOG(error) << "Cannot restore file offset: unknown offset";
+      ok = false;
+      break;
     }
   }
 
