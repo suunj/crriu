@@ -147,6 +147,39 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   std::set<FdTable*> done_tables;
   int close_failures = 0;
 
+  std::set<const void*> restored_tables;
+
+  // Restore working directories before recreating file descriptors.
+  for (Task* t : tasks) {
+    if (!model.apply_cwd(t)) {
+      fprintf(stderr,
+              "rr detach: failed to restore cwd for tid=%d\n",
+              t->rec_tid);
+      return 1;
+    }
+  }
+
+  for (Task* t : tasks) {
+    const void* table_id = model.table_id(t);
+
+    if (!restored_tables.insert(table_id).second)
+      continue;
+
+    if (!model.materialize(t)) {
+      fprintf(stderr,
+              "rr detach: failed to recreate fds for tid=%d\n",
+              t->rec_tid);
+      return 1;
+    }
+  }
+
+  for (Task* t : tasks) {
+    if (!sigs.materialize(t)) {
+      fprintf(stderr, "rr detach: failed to restore signal state\n");
+      return 1;
+    }
+  }
+
   for (Task* t : tasks) {
     FdTable* table = t->fd_table().get();
     if (!done_tables.insert(table).second)
@@ -198,22 +231,6 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
             "rr detach: %d rr fd(s) could not be closed\n",
             close_failures);
     return 1;
-  }
-
-  // Reconstruct kernel state replay never created: fds/cwd (shared), per-thread signal masks, handler table.
-  for (Task* t : tasks) {
-    if (!model.apply_cwd(t) || !model.materialize(t)) {
-      fprintf(stderr,
-              "rr detach: failed to recreate fds for tid=%d\n",
-              t->rec_tid);
-      return 1;
-    }
-  }
-  for (Task* t : tasks) {
-    if (!sigs.materialize(t)) {
-      fprintf(stderr, "rr detach: failed to restore signal state\n");
-      return 1;
-    }
   }
 
   // 4. Restore registers and detach all tasks.

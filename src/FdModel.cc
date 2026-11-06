@@ -283,26 +283,48 @@ bool FdModel::materialize(Task* t) {
     if (temporary.count(f))
       continue;
 
-    long r;
-    if (f->type == OpenFile::EVENTFD) {
-      r = remote.syscall(syscall_number_for_eventfd2(arch),
-                         (unsigned)f->counter, f->flags);
-    } else if (f->type == OpenFile::SIGNALFD) {
-      AutoRestoreMem mask(remote, &f->sigmask, sizeof(f->sigmask));
-      r = remote.syscall(syscall_number_for_signalfd4(arch), -1,
-                         mask.get().as_int(), sizeof(f->sigmask), f->flags);
-    } else if (f->type == OpenFile::EPOLL) {
-      r = remote.syscall(syscall_number_for_epoll_create1(arch), f->flags);
-    } else {
-      AutoRestoreMem path_mem(remote, f->path.c_str());
-      r = remote.syscall(openat_nr, AT_FDCWD, path_mem.get().as_int(),
-                         f->flags & ~(O_CREAT | O_TRUNC | O_EXCL), 0);
-    }
+    long r = -1;
 
-    if (r < 0) {
-      LOG(error) << "openat(" << f->path << ") -> " << r;
-      ok = false;
-      break;
+    auto existing = materialized_files.find(f);
+
+    if (existing != materialized_files.end()) {
+      r = remote.infallible_send_fd_if_alive(existing->second);
+    } else {
+      if (f->type == OpenFile::EVENTFD) {
+        r = remote.syscall(
+          syscall_number_for_eventfd2(arch),
+          (unsigned)f->counter,
+          f->flags);
+      } else if (f->type == OpenFile::SIGNALFD) {
+        AutoRestoreMem mask(remote, &f->sigmask, sizeof(f->sigmask));
+        r = remote.syscall(
+          syscall_number_for_signalfd4(arch),
+          -1, mask.get().as_int(),
+          sizeof(f->sigmask), f->flags);
+      } else if (f->type == OpenFile::EPOLL) {
+        r = remote.syscall(
+          syscall_number_for_epoll_create1(arch),
+          f->flags);
+      } else {
+        AutoRestoreMem path_mem(remote, f->path.c_str());
+        r = remote.syscall(
+          openat_nr,
+          AT_FDCWD,
+          path_mem.get().as_int(),
+          f->flags & ~(O_CREAT | O_TRUNC | O_EXCL),
+          0);
+      }
+
+      if (r >= 0) {
+        ScopedFd shared = remote.retrieve_fd((int)r);
+
+        if (!shared.is_open()) {
+          LOG(error) << "Failed to retrieve fd " << r;
+          return false;
+        }
+
+        materialized_files.emplace(f, std::move(shared));
+      }
     }
 
     // Move the new FD outside the target range.
@@ -551,6 +573,10 @@ void FdModel::fork_task(Task* parent, Task* child, int flags) {
 const std::map<int, FdModel::OpenFilePtr>&
 FdModel::fds(Task* t) const {
   return task_tables.at(t->rec_tid)->fds;
+}
+
+const void* FdModel::table_id(Task* t) const {
+  return task_tables.at(t->rec_tid).get();
 }
 
 } // namespace rr

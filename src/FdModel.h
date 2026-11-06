@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <string>
 
+#include "ScopedFd.h"
+
 namespace rr {
 
 class Task;
@@ -83,6 +85,8 @@ public:
 
   const std::map<int, OpenFilePtr>& fds(Task* t) const;
 
+  const void* table_id(Task* t) const;
+
 private:
   std::string resolve(Task* t, int dirfd, uintptr_t path_ptr);
 
@@ -95,6 +99,8 @@ private:
 
   std::map<pid_t, ModelFdTablePtr> task_tables;
   int64_t last_time = 0;
+
+  std::map<OpenFile*, ScopedFd> materialized_files;
 };
 
 } // namespace rr
