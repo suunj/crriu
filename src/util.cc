@@ -2779,13 +2779,17 @@ bool virtual_address_size_supported(uint8_t bits) {
 }
 
 void reserve_next_pid(pid_t want) {
-  ScopedFd fd("/proc/sys/kernel/ns_last_pid", O_WRONLY);
+  ScopedFd fd("/proc/sys/kernel/ns_last_pid", O_RDWR);
   if (!fd.is_open()) {
     LOG(warn) << "Can't open ns_last_pid; pid " << want << " not reserved";
     return;
   }
+  char buf[32] = {};
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  long cur = n > 0 ? strtol(buf, nullptr, 10) : -1;
+  LOG(debug) << "reserve_next_pid: want " << want << ", ns_last_pid was " << cur;
   string s = to_string(want - 1);
-  if (write(fd, s.c_str(), s.size()) != (ssize_t)s.size()) {
+  if (pwrite(fd, s.c_str(), s.size(), 0) != (ssize_t)s.size()) {
     LOG(warn) << "Failed to reserve pid " << want;
   }
 }

@@ -265,6 +265,10 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
       << "Expected tid " << t->rec_tid << ", got " << tte.parent_tid();
   long rec_tid = tte.tid();
 
+  if (t->session().as_replay()->flags().preserve_thread_groups && new_tid != rec_tid) {
+    FATAL() << "tid reservation failed: wanted " << rec_tid << " but got " << new_tid;
+  }
+
   CloneParameters params;
   if (Arch::clone == t->regs().original_syscallno()) {
     params = extract_clone_parameters(t);
