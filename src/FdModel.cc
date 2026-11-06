@@ -556,7 +556,7 @@ void FdModel::fork_task(Task* parent, Task* child, int flags) {
   }
 
   ModelFdTablePtr child_table =
-      (flags & CLONE_FILES)
+      (flags & CLONE_SHARE_FILES)
           ? it->second
           : std::make_shared<ModelFdTable>(*it->second);
 
@@ -566,7 +566,7 @@ void FdModel::fork_task(Task* parent, Task* child, int flags) {
           "[FdModel] fork parent=%d child=%d shared=%d fds=%zu\n",
           parent->rec_tid,
           child->rec_tid,
-          !!(flags & CLONE_FILES),
+          !!(flags & CLONE_SHARE_FILES),
           child_table->fds.size());
 }
 
