@@ -173,6 +173,11 @@ Task* Session::clone(Task* p, int flags, remote_ptr<void> stack,
   Task* c = p->clone(Task::TRACEE_CLONE, flags, stack, tls, cleartid_addr,
                      new_tid, new_rec_tid, next_task_serial());
   on_create(c);
+
+  if (on_task_cloned) {
+    on_task_cloned(p, c, flags);
+  }
+
   return c;
 }
 

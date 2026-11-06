@@ -21,6 +21,7 @@ using namespace std;
 namespace rr {
 
 string FdModel::resolve(Task* t, int dirfd, uintptr_t path_ptr) {
+  auto& table = task_tables.at(t->rec_tid)->fds;
   string p = t->read_c_str(remote_ptr<char>(path_ptr));
   if (!p.empty() && p[0] == '/')
     return p;
@@ -34,9 +35,17 @@ string FdModel::resolve(Task* t, int dirfd, uintptr_t path_ptr) {
 }
 
 void FdModel::observe(const TraceFrame& frame, Task* t) {
-  if (frame.time() == last_time)
-    return;   // replay_step can report the same frame twice
+  auto it = task_tables.find(t->rec_tid);
+  if (it == task_tables.end()) {
+    return;
+  }
+
+  if (frame.time() == last_time) {
+    return;
+  }
   last_time = frame.time();
+
+  auto& table = it->second->fds;
 
   const Event& ev = frame.event();
   if (!ev.is_syscall_event())
@@ -227,6 +236,7 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
 }
 
 bool FdModel::materialize(Task* t) {
+  auto& table = task_tables.at(t->rec_tid)->fds;
   if (table.empty())
     return true;
 
@@ -508,6 +518,39 @@ bool FdModel::apply_cwd(Task* t) {
   }
 
   return true;
+}
+
+void FdModel::init_task(Task* t) {
+  task_tables[t->rec_tid] = std::make_shared<ModelFdTable>();
+}
+
+void FdModel::fork_task(Task* parent, Task* child, int flags) {
+  auto it = task_tables.find(parent->rec_tid);
+
+  if (it == task_tables.end()) {
+    fprintf(stderr, "[FdModel] missing parent table: %d\n",
+            parent->rec_tid);
+    abort();
+  }
+
+  ModelFdTablePtr child_table =
+      (flags & CLONE_FILES)
+          ? it->second
+          : std::make_shared<ModelFdTable>(*it->second);
+
+  task_tables[child->rec_tid] = child_table;
+
+  fprintf(stderr,
+          "[FdModel] fork parent=%d child=%d shared=%d fds=%zu\n",
+          parent->rec_tid,
+          child->rec_tid,
+          !!(flags & CLONE_FILES),
+          child_table->fds.size());
+}
+
+const std::map<int, FdModel::OpenFilePtr>&
+FdModel::fds(Task* t) const {
+  return task_tables.at(t->rec_tid)->fds;
 }
 
 } // namespace rr

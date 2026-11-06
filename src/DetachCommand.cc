@@ -100,6 +100,13 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     fprintf(stderr, "rr detach: assuming recording cwd %s; pass --cwd if different\n", cwd.c_str());
   }
   FdModel model(cwd);
+  model.init_task(session->current_task());
+
+  session->on_task_cloned =
+    [&](Task* parent, Task* child, int flags) {
+      model.fork_task(parent, child, flags);
+    };
+
   SignalModel sigs;
 
   // 1. Replay until event `flags.event` has been fully replayed, i.e. the
@@ -119,7 +126,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   }
 
   // 모델 덤프 (검증용)
-  for (auto& kv : model.fds())
+  for (const auto& kv : model.fds(session->current_task()))
     fprintf(stderr, "fd %d -> %s flags=%#x off=%lld\n", kv.first,
             kv.second->path.c_str(), kv.second->flags, (long long)kv.second->offset);
 
@@ -194,9 +201,13 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   }
 
   // Reconstruct kernel state replay never created: fds/cwd (shared), per-thread signal masks, handler table.
-  if (!model.apply_cwd(tasks[0]) || !model.materialize(tasks[0])) {
-    fprintf(stderr, "rr detach: failed to recreate fds\n");
-    return 1;
+  for (Task* t : tasks) {
+    if (!model.apply_cwd(t) || !model.materialize(t)) {
+      fprintf(stderr,
+              "rr detach: failed to recreate fds for tid=%d\n",
+              t->rec_tid);
+      return 1;
+    }
   }
   for (Task* t : tasks) {
     if (!sigs.materialize(t)) {

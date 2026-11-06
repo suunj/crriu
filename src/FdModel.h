@@ -78,13 +78,22 @@ public:
   /** Set the tracee's cwd to the modelled one (initial + observed chdirs). */
   bool apply_cwd(Task* t);
 
-  const std::map<int, OpenFilePtr>& fds() const { return table; }
+  void init_task(Task* t);
+  void fork_task(Task* parent, Task* child, int flags);
+
+  const std::map<int, OpenFilePtr>& fds(Task* t) const;
 
 private:
   std::string resolve(Task* t, int dirfd, uintptr_t path_ptr);
 
   std::string cwd;
-  std::map<int, OpenFilePtr> table;
+  struct ModelFdTable {
+    std::map<int, OpenFilePtr> fds;
+  };
+
+  using ModelFdTablePtr = std::shared_ptr<ModelFdTable>;
+
+  std::map<pid_t, ModelFdTablePtr> task_tables;
   int64_t last_time = 0;
 };
 

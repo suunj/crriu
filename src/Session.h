@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <functional>
 
 #include "AddressSpace.h"
 #include "CPUs.h"
@@ -426,6 +427,8 @@ public:
   bool intel_pt_enabled() const { return intel_pt_; }
 
   virtual bool mark_stdio() const;
+
+  std::function<void(Task*, Task*, int)> on_task_cloned;
 
 protected:
   Session();
