@@ -8,6 +8,7 @@
 #include <linux/net.h>
 #include <linux/perf_event.h>
 #include <linux/unistd.h>
+#include <linux/sched.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -3863,6 +3864,14 @@ long Task::ptrace_seize(pid_t tid, Session& session) {
   return ret;
 }
 
+static pid_t fork_with_tid(pid_t want) {
+  struct clone_args args = {};
+  args.exit_signal = SIGCHLD;
+  args.set_tid = (uintptr_t)&want;
+  args.set_tid_size = 1;
+  return syscall(SYS_clone3, &args, sizeof(args));
+}
+
 /*static*/ Task* Task::spawn(Session& session, ScopedFd& error_fd,
                              ScopedFd* sock_fd_out,
                              ScopedFd* sock_fd_receiver_out,
@@ -3908,12 +3917,12 @@ long Task::ptrace_seize(pid_t tid, Session& session) {
   SeccompFilter<struct sock_filter> filter = create_seccomp_filter();
   struct sock_fprog prog = {(unsigned short)filter.filters.size(),
                             filter.filters.data()};
-  if (session.as_replay() && session.as_replay()->flags().preserve_thread_groups) {
-    // Give the tracee its recorded pid (only effective in a fresh pid ns).
-    reserve_next_pid(rec_tid);
-  }
+  bool want_tid = session.as_replay() &&
+                  session.as_replay()->flags().preserve_thread_groups;
   do {
-    tid = fork();
+    // With preserve_thread_groups the tracee must get its recorded pid, so
+    // ask the kernel for it directly instead of steering ns_last_pid.
+    tid = want_tid ? fork_with_tid(rec_tid) : fork();
     // fork() can fail with EAGAIN due to temporary load issues. In such
     // cases, retry the fork().
   } while (0 > tid && errno == EAGAIN);
@@ -3925,9 +3934,8 @@ long Task::ptrace_seize(pid_t tid, Session& session) {
   }
 
   if (0 > tid) {
-    FATAL() << "Failed to fork";
+    FATAL() << "Failed to fork" << (want_tid ? " with tid " + to_string(rec_tid) : "");
   }
-
   // Make sure the child has the only reference to this side of the pipe.
   error_fd.close();
 
