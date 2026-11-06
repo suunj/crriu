@@ -365,38 +365,77 @@ bool FdModel::materialize(Task* t) {
   std::set<OpenFile*> restored_epolls;
 
   for (const auto& kv : table) {
-    OpenFile* f = kv.second.get();
+    OpenFile* ep = kv.second.get();
 
-    if (f->type != OpenFile::EPOLL)
+    if (ep->type != OpenFile::EPOLL)
       continue;
 
-    // Multiple fds may refer to the same epoll instance.
-    if (!restored_epolls.insert(f).second)
+    if (!restored_epolls.insert(ep).second)
       continue;
 
-    LOG(error) << "epoll fd=" << kv.first
-           << " members=" << f->epoll_members.size();
+    const int epfd = kv.first;
 
-    for (const auto& m : f->epoll_members) {
-      const EpollKey& key = m.first;
-
-      LOG(error) << "registered_fd=" << key.fd
-        << " file=" << key.file.get()
-        << " data=" << m.second.data;
-    }
-    for (const auto& m : f->epoll_members) {
+    for (const auto& m : ep->epoll_members) {
       const EpollKey& key = m.first;
       const EpollMember& member = m.second;
 
-      // The registered fd must still refer to the original file.
-      auto it = table.find(key.fd);
+      // Find a live fd referring to the registered OFD.
+      int source_fd = -1;
 
-      if (it == table.end() || it->second != key.file) {
-        LOG(error) << "Cannot restore epoll membership: fd "
-          << key.fd
-          << " no longer refers to the registered file";
+      for (const auto& candidate : table) {
+        if (candidate.second == key.file) {
+          source_fd = candidate.first;
+          break;
+        }
+      }
+
+      if (source_fd < 0) {
+        LOG(error) << "Cannot restore epoll membership: "
+          << "no live fd for registered OFD";
         ok = false;
         continue;
+      }
+
+      // Check whether the original registered fd already refers
+      // to the correct OFD.
+      auto current = table.find(key.fd);
+      bool needs_remap =
+        current == table.end() || current->second != key.file;
+
+      int saved_fd = -1;
+
+      if (needs_remap) {
+        // Preserve the current occupant of key.fd, if any.
+        if (current != table.end()) {
+          saved_fd = remote.syscall(
+            syscall_number_for_dup(arch),
+            key.fd);
+
+          if (saved_fd < 0) {
+            LOG(error) << "dup(" << key.fd
+              << ") -> " << saved_fd;
+            ok = false;
+            continue;
+          }
+        }
+
+        long r = remote.syscall(
+          syscall_number_for_dup2(arch),
+          source_fd,
+          key.fd);
+
+        if (r < 0) {
+          LOG(error) << "dup2(" << source_fd
+            << ", " << key.fd << ") -> " << r;
+          ok = false;
+
+          if (saved_fd >= 0) {
+            remote.syscall(
+              syscall_number_for_close(arch),
+              saved_fd);
+          }
+          continue;
+        }
       }
 
       struct {
@@ -411,16 +450,40 @@ bool FdModel::materialize(Task* t) {
 
       long r = remote.syscall(
         syscall_number_for_epoll_ctl(arch),
-        kv.first,
+        epfd,
         EPOLL_CTL_ADD,
         key.fd,
         evmem.get().as_int());
 
       if (r != 0) {
-        LOG(error) << "epoll_ctl(" << kv.first
+        LOG(error) << "epoll_ctl(" << epfd
           << ", ADD, " << key.fd
           << ") -> " << r;
         ok = false;
+      }
+
+      // Restore the original fd table.
+      if (needs_remap) {
+        if (saved_fd >= 0) {
+          long restore = remote.syscall(
+            syscall_number_for_dup2(arch),
+            saved_fd,
+            key.fd);
+
+          if (restore < 0) {
+            LOG(error) << "Failed to restore fd "
+              << key.fd << ": " << restore;
+            ok = false;
+          }
+
+          remote.syscall(
+            syscall_number_for_close(arch),
+            saved_fd);
+        } else {
+          remote.syscall(
+            syscall_number_for_close(arch),
+            key.fd);
+        }
       }
     }
   }
