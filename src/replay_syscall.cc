@@ -5,6 +5,7 @@
 #include <linux/futex.h>
 #include <linux/perf_event.h>
 #include <linux/shm.h>
+#include <linux/sched.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -150,6 +151,44 @@ static bool syscall_shares_vm(Registers r)
   }
 }
 
+/**
+ * Rewrite a clone(flags, stack, ptid, ctid, tls) that the tracee is about to
+ * execute into clone3 with set_tid, so the kernel hands out exactly
+ * |want_tid|. The clone_args block is placed in the tracee's scratch memory.
+ * Returns the register state to run.
+ */
+template <typename Arch>
+static Registers clone_to_clone3(ReplayTask* t, Registers r, uintptr_t flags,
+                                 pid_t want_tid) {
+  struct clone_args ca;
+  memset(&ca, 0, sizeof(ca));
+
+  ca.flags = flags & ~(uintptr_t)CSIGNAL;
+  ca.exit_signal = flags & CSIGNAL;
+  ca.parent_tid = r.arg3();
+  ca.child_tid = r.arg4();
+  ca.tls = r.arg5();
+  // clone() takes the child's initial sp; clone3 takes a region and uses
+  // stack + stack_size as sp. Any nonzero size below the sp gives the same sp.
+  if (r.arg2()) {
+    ca.stack = r.arg2() - 16;
+    ca.stack_size = 16;
+  }
+  remote_ptr<void> base = t->scratch_ptr;
+  ASSERT(t, t->scratch_size >= (ssize_t)(sizeof(ca) + sizeof(pid_t)));
+  remote_ptr<pid_t> tid_ptr = (base + sizeof(ca)).cast<pid_t>();
+
+  ca.set_tid = tid_ptr.as_int();
+  ca.set_tid_size = 1;
+  t->write_mem(base.cast<struct clone_args>(), ca);
+  t->write_mem(tid_ptr, want_tid);
+  r.set_syscallno(Arch::clone3);
+  r.set_arg1(base.as_int());
+  r.set_arg2(sizeof(ca));
+
+  return r;
+}
+
 template <typename Arch> static void prepare_clone(ReplayTask* t) {
   const TraceFrame& trace_frame = t->current_trace_frame();
 
@@ -213,16 +252,20 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
     r.set_arg1(flags);
     r.set_arg2(0);
   }
-  r.set_syscallno(sys);
+  TraceTaskEvent tte = read_task_trace_event(t, TraceTaskEvent::CLONE);
+
+  bool preserve = t->session().as_replay()->flags().preserve_thread_groups;
+  if (preserve && Arch::clone == sys) {
+    // |flags| here is the masked value for Arch::clone, or CLONE_VM for the
+    // vfork-as-clone case; both go through clone3 so the kernel assigns the
+    // recorded tid.
+    r = clone_to_clone3<Arch>(t, r, r.arg1(), tte.tid());
+  } else {
+    r.set_syscallno(sys);
+  }
   r.set_ip(r.ip().decrement_by_syscall_insn_length(r.arch()));
   t->set_regs(r);
   Registers entry_regs = r;
-
-  TraceTaskEvent tte = read_task_trace_event(t, TraceTaskEvent::CLONE);
-
-  if (t->session().as_replay()->flags().preserve_thread_groups) {
-    reserve_next_pid(tte.tid());
-  }
 
   // Run; we will be interrupted by PTRACE_EVENT_CLONE/FORK/VFORK.
   bool ok = t->resume_execution(RESUME_CONT, RESUME_WAIT_NO_EXIT, RESUME_NO_TICKS);
