@@ -24,12 +24,21 @@ Switchable StdioMonitor::will_write(Task* t) {
 void StdioMonitor::did_write(Task* t, const std::vector<Range>& ranges,
                              LazyOffset&) {
   ReplaySession* replay_session = t->session().as_replay();
-  if (!replay_session || !replay_session->echo_stdio()) {
+  if (!replay_session) {
+    return;
+  }
+  bool echo = replay_session->echo_stdio();
+  if (!echo && !replay_session->on_stdio_output) {
     return;
   }
   for (auto& r : ranges) {
     auto bytes = t->read_mem(r.data.cast<uint8_t>(), r.length);
-    write_all(original_fd, bytes.data(), bytes.size());
+    if (echo) {
+      write_all(original_fd, bytes.data(), bytes.size());
+    }
+    if (replay_session->on_stdio_output) {
+      replay_session->on_stdio_output(original_fd, bytes);
+    }
   }
 }
 

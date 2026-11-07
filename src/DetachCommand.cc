@@ -48,6 +48,7 @@ struct DetachFlags {
   FrameTime event;
   string cwd;
   bool strict;
+  string until_output;
   DetachFlags() : event(0), strict(false) {}
 };
 
@@ -59,6 +60,7 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
     { 'c', "cwd", HAS_PARAMETER },
     { 's', "strict", NO_PARAMETER },
     { 'e', "event", HAS_PARAMETER },
+    { 'u', "until-output", HAS_PARAMETER },
   };
   ParsedOption opt;
   if (!Command::parse_option(args, options, &opt)) {
@@ -76,6 +78,9 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
         return false;
       }
       flags.event = opt.int_value;
+      break;
+    case 'u':
+      flags.until_output = opt.value;
       break;
     default:
       DEBUG_ASSERT(0 && "Unknown option");
@@ -158,11 +163,32 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
 
   // 1. Replay until event `flags.event` has been fully replayed, i.e. the
   //    trace reader has moved past it.
-  while (session->trace_reader().time() <= flags.event) {
+  FrameTime stop_at = flags.event;
+  string seen;
+  bool hit = false;
+
+  if (!flags.until_output.empty()) {
+    stop_at = INT64_MAX;
+    session->on_stdio_output = [&](int, const vector<uint8_t>& b) {
+      if (hit)
+        return;
+
+      seen.append(b.begin(), b.end());
+
+      if (seen.find(flags.until_output) != string::npos)
+        hit = true;
+      if (seen.size() > 65536)
+        seen.erase(0, seen.size() - 32768);
+    };
+  }
+
+  FrameTime stopped_at = 0;
+  while (session->trace_reader().time() <= stop_at) {
     auto result = session->replay_step(RUN_CONTINUE);
     if (result.status == REPLAY_EXITED) {
-      fprintf(stderr, "rr detach: trace ended before event %lld\n",
-              (long long)flags.event);
+      fprintf(stderr, "rr detach: trace ended before %s\n",
+              hit || flags.until_output.empty() ? "the target event" : "the output appeared");
+
       return 1;
     }
     Task* cur = session->current_task();
@@ -171,6 +197,9 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
       sigs.observe(session->current_trace_frame(), cur);
       check.observe(session->current_trace_frame(), cur);
     }
+    stopped_at = session->current_trace_frame().time();
+    if (hit)
+      break;
   }
 
   // 모델 덤프 (검증용)
@@ -340,7 +369,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   }
 
   printf("detached pid %d after event %lld (%zu threads)\n",
-       real_pid, (long long)flags.event, tasks.size());
+       real_pid, (long long)stopped_at, tasks.size());
   fflush(stdout);
 
   // 5. Keep rr alive until the tracees are handed off.
@@ -355,7 +384,7 @@ int DetachCommand::run(vector<string>& args) {
   DetachFlags flags;
   while (parse_detach_arg(args, flags)) {
   }
-  if (!flags.event) {
+  if (!flags.event && flags.until_output.empty()) {
     print_help(stderr);
     return 1;
   }

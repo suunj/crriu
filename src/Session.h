@@ -429,6 +429,7 @@ public:
   virtual bool mark_stdio() const;
 
   std::function<void(Task*, Task*, int)> on_task_cloned;
+  std::function<void(int fd, const std::vector<uint8_t>& data)> on_stdio_output;
 
 protected:
   Session();
