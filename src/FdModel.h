@@ -54,6 +54,7 @@ public:
       EVENTFD,
       SIGNALFD,
       EPOLL,
+      UNIX_DGRAM,
       UNSUPPORTED
     };
     Type type = REGULAR;
@@ -66,6 +67,7 @@ public:
 
     std::map<EpollKey, EpollMember, EpollKeyLess> epoll_members;
     std::string origin;
+    std::vector<uint8_t> addr;
   };
 
   explicit FdModel(const std::string& initial_cwd) : cwd(initial_cwd) {}

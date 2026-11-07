@@ -1,6 +1,8 @@
 /* -*- Mode: C++; tab-width: 8; c-basic-offset: 2; indent-tabs-mode: nil; -*- */
 #include "FdModel.h"
 
+#include <sys/socket.h>
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
@@ -231,6 +233,23 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
       }
     }
   }
+  if (is_socket_syscall(no, arch) && ret >= 0 &&
+      a0 == AF_UNIX && (a1 & 0xff) == SOCK_DGRAM) {
+    auto f = make_shared<OpenFile>();
+    f->type = OpenFile::UNIX_DGRAM;
+    f->flags = (int)a1;            // SOCK_DGRAM | SOCK_CLOEXEC/NONBLOCK
+    table[(int)ret] = f;
+    return;
+  }
+  if (is_connect_syscall(no, arch) && ret == 0) {
+    auto it2 = table.find((int)a0);
+    if (it2 != table.end() && it2->second->type == OpenFile::UNIX_DGRAM) {
+      bool ok = true;
+      it2->second->addr = t->read_mem(remote_ptr<uint8_t>((uintptr_t)a1), (size_t)a2, &ok);
+      if (!ok) it2->second->addr.clear();
+    }
+    return;
+  }
   if ((is_socket_syscall(no, arch) || is_socketpair_syscall(no, arch) ||
     is_pipe_syscall(no, arch) || is_pipe2_syscall(no, arch) ||
     is_accept_syscall(no, arch) || is_accept4_syscall(no, arch) ||
@@ -322,6 +341,17 @@ bool FdModel::materialize(Task* t) {
         r = remote.syscall(
           syscall_number_for_epoll_create1(arch),
           f->flags);
+      } else if (f->type == OpenFile::UNIX_DGRAM) {
+        r = remote.syscall(syscall_number_for_socket(arch), AF_UNIX, f->flags, 0);
+        if (r >= 0 && !f->addr.empty()) {
+          AutoRestoreMem sa(remote, f->addr.data(), f->addr.size());
+          long c = remote.syscall(syscall_number_for_connect(arch),
+                                  (int)r, sa.get().as_int(), f->addr.size());
+          if (c < 0) {
+            LOG(error) << "connect for fd " << kv.first << " failed: " << errno_name(-c);
+            return false;
+          }
+        }
       } else {
         AutoRestoreMem path_mem(remote, f->path.c_str());
         r = remote.syscall(
@@ -366,7 +396,9 @@ bool FdModel::materialize(Task* t) {
     temporary[f] = (int)tmp;
     temp_fds.insert((int)tmp);
 
-    if (f->offset >= 0) {
+    if (f->type != OpenFile::REGULAR) {
+      // Only regular files have an offset to restore.
+    } else if (f->offset >= 0) {
       long pos = remote.syscall(syscall_number_for_lseek(arch), tmp, f->offset, SEEK_SET);
 
       if (pos != f->offset) {
