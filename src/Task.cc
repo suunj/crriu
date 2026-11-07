@@ -2755,7 +2755,10 @@ Task* Task::clone(CloneReason reason, int flags, remote_ptr<void> stack,
 
     // `t` doesn't have a syscallbuf and `t->desched_fd_child`/
     // `t->cloned_file_data_fd_child` are both -1.
-    if (session().is_replaying()) {
+    bool really_shared = (CLONE_SHARE_FILES & flags) &&
+        session().as_replay() &&
+        session().as_replay()->flags().preserve_thread_groups;
+    if (session().is_replaying() && !really_shared) {
       // `t` is not really sharing our fd table, in fact our real fd table
       // is only used by this task, so it only contains our syscallbuf fds (if any),
       // not the fds for any other task. So, only really-close the fds for 'this'.
