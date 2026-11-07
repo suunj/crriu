@@ -18,7 +18,12 @@ public:
   // Returns the findings; empty means detach is believed safe.
   std::vector<std::string> run(const std::vector<Task*>& tasks, const FdModel& model);
 private:
-  struct LastSyscall { int number; bool exiting; int64_t time; };
+  struct LastSyscall {
+    int number;
+    bool exiting;
+    int64_t time;
+    long fd;
+  };
   std::map<pid_t, LastSyscall> last;   // keyed by rec_tid
 };
 }

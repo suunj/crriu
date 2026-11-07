@@ -275,6 +275,18 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
     return;
   }
 
+  if (is_rrcall_init_buffers_syscall(no, arch)) {
+    for (auto it2 = table.begin(); it2 != table.end();) {
+      if (it2->second->type == OpenFile::UNSUPPORTED &&
+        it2->second->origin == "perf_event_open") {
+        it2 = table.erase(it2);
+      } else {
+        ++it2;
+      }
+    }
+    return;
+  }
+
   if ((is_socket_syscall(no, arch) || is_socketpair_syscall(no, arch) ||
     is_pipe_syscall(no, arch) || is_pipe2_syscall(no, arch) ||
     is_accept_syscall(no, arch) || is_accept4_syscall(no, arch) ||

@@ -10,7 +10,8 @@ namespace rr {
 void DetachCheck::observe(const TraceFrame& frame, Task* t) {
   if (!frame.event().is_syscall_event()) return;
   const auto& ev = frame.event().Syscall();
-  last[t->rec_tid] = { ev.number, ev.state == EXITING_SYSCALL, (int64_t)frame.time() };
+  last[t->rec_tid] = { ev.number, ev.state == EXITING_SYSCALL, (int64_t)frame.time(),
+                       (long)frame.regs().arg1_signed() };
 }
 
 // Syscalls whose EXITING state leaves nothing in the kernel that the models
@@ -40,12 +41,19 @@ static bool exit_effect_covered(int no, SupportedArch a) {
     is_uname_syscall(no,a) || is_getrlimit_syscall(no,a) || is_prlimit64_syscall(no,a);
 }
 
+// Writes to stdout/stderr are echoed by the replay session itself.
+static bool stdio_write(int no, long fd, SupportedArch a) {
+  return (fd == 1 || fd == 2) &&
+         (is_write_syscall(no,a) || is_writev_syscall(no,a) || is_pwritev_syscall(no,a));
+}
+
 vector<string> DetachCheck::run(const vector<Task*>& tasks, const FdModel& model) {
   vector<string> out;
   for (Task* t : tasks) {
     auto it = last.find(t->rec_tid);
     if (it != last.end() && it->second.exiting &&
-        !exit_effect_covered(it->second.number, t->arch())) {
+      !exit_effect_covered(it->second.number, t->arch()) &&
+      !stdio_write(it->second.number, it->second.fd, t->arch())) {
       out.push_back("tid " + to_string(t->rec_tid) + ": kernel effect of " +
                     syscall_name(it->second.number, t->arch()) + " (event " +
                     to_string(it->second.time) + ") is not reflected");

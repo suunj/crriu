@@ -128,6 +128,9 @@ static void restore_patched_code(Task* t) {
 static int detach(const string& trace_dir, const DetachFlags& flags) {
   ReplaySession::Flags session_flags;
   session_flags.preserve_thread_groups = true;
+  // Echo recorded stdout/stderr writes during replay so that console output
+  // up to the detach point ends up where the tracee's stdio points.
+  session_flags.redirect_stdio = true;
   ReplaySession::shr_ptr session =
       ReplaySession::create(trace_dir, session_flags);
 
