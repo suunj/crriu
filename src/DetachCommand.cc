@@ -184,6 +184,13 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
 
   FrameTime stopped_at = 0;
   while (session->trace_reader().time() <= stop_at) {
+    // current_trace_frame() is the frame about to be replayed; feed it to
+    // the models now so they stay exactly in step with what has run.
+    if (Task* cur = session->current_task()) {
+      model.observe(session->current_trace_frame(), cur);
+      sigs.observe(session->current_trace_frame(), cur);
+      check.observe(session->current_trace_frame(), cur);
+    }
     auto result = session->replay_step(RUN_CONTINUE);
     if (result.status == REPLAY_EXITED) {
       fprintf(stderr, "rr detach: trace ended before %s\n",
@@ -191,21 +198,12 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
 
       return 1;
     }
-    Task* cur = session->current_task();
-    if (cur) {
-      model.observe(session->current_trace_frame(), cur);
-      sigs.observe(session->current_trace_frame(), cur);
-      check.observe(session->current_trace_frame(), cur);
-    }
-    stopped_at = session->current_trace_frame().time();
+    // The reader has moved on to the next frame; the one just replayed is
+    // the frame before it.
+    stopped_at = session->trace_reader().time() - 1;
     if (hit)
       break;
   }
-
-  // 모델 덤프 (검증용)
-  for (const auto& kv : model.fds(session->current_task()))
-    fprintf(stderr, "fd %d -> %s flags=%#x off=%lld\n", kv.first,
-            kv.second->path.c_str(), kv.second->flags, (long long)kv.second->offset);
 
   // 2. Collect tasks.
   vector<Task*> tasks;
@@ -299,8 +297,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
                   t->tid, fd, strerror(-ret));
           close_failures++;
         } else {
-          fprintf(stderr, "tid %d: closed rr fd %d\n",
-                  t->tid, fd);
+          LOG(debug) << "tid " << t->tid << ": closed rr fd " << fd;
         }
       }
     }
@@ -337,20 +334,16 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
       regs.set_syscall_result(regs.original_syscallno());
       regs.set_ip(regs.ip() - 2);   // x86-64 `syscall` is 2 bytes
 
-      fprintf(stderr, "tid %d: rewound to re-execute syscall %ld\n",
-              t->tid, (long)regs.original_syscallno());
+      LOG(debug) << "tid " << t->tid << ": rewound to re-execute syscall "
+                 << regs.original_syscallno();
     }
     regs.set_original_syscallno(-1);
     t->set_regs(regs);
 
-    fprintf(stderr, "tid %d logical rax=%llx orig=%llx\n", t->tid,
-            (unsigned long long)regs.syscall_result(),
-            (unsigned long long)regs.original_syscallno());
 
     bool flushed = t->flush_regs();
-    fprintf(stderr, "tid %d flush=%d ip=%p\n",
-            t->tid, flushed,
-            (void*)t->ip().register_value());
+    LOG(debug) << "tid " << t->tid << ": flushed=" << flushed
+               << " ip=" << t->ip();
   }
 
   // 4b. Release all tasks, stopped.
@@ -359,8 +352,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     long r = t->fallible_ptrace(
         PTRACE_DETACH, nullptr, (void*)(uintptr_t)SIGSTOP);
 
-    fprintf(stderr, "detach tid %d: ret=%ld errno=%d (%s)\n",
-            t->tid, r, errno, strerror(errno));
+    LOG(debug) << "detach tid " << t->tid << ": ret=" << r;
 
     if (r < 0) {
       fprintf(stderr, "rr detach: failed to detach tid %d\n", t->tid);

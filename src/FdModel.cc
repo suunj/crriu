@@ -638,9 +638,7 @@ void FdModel::fork_task(Task* parent, Task* child, int flags) {
   auto it = task_tables.find(parent->rec_tid);
 
   if (it == task_tables.end()) {
-    fprintf(stderr, "[FdModel] missing parent table: %d\n",
-            parent->rec_tid);
-    abort();
+    FATAL() << "FdModel: no fd table for parent " << parent->rec_tid;
   }
 
   ModelFdTablePtr child_table =
@@ -650,12 +648,9 @@ void FdModel::fork_task(Task* parent, Task* child, int flags) {
 
   task_tables[child->rec_tid] = child_table;
 
-  fprintf(stderr,
-          "[FdModel] fork parent=%d child=%d shared=%d fds=%zu\n",
-          parent->rec_tid,
-          child->rec_tid,
-          !!(flags & CLONE_SHARE_FILES),
-          child_table->fds.size());
+  LOG(debug) << "fork parent=" << parent->rec_tid << " child=" << child->rec_tid
+             << " shared=" << !!(flags & CLONE_SHARE_FILES)
+             << " fds=" << child_table->fds.size();
 }
 
 const std::map<int, FdModel::OpenFilePtr>&
