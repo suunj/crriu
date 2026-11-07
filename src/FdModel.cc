@@ -250,6 +250,31 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
     }
     return;
   }
+
+  if (is_memfd_create_syscall(no, arch) && ret >= 0) {
+    auto f = make_shared<OpenFile>();
+
+    f->type = OpenFile::MEMFD;
+    f->path = t->read_c_str(remote_ptr<char>((uintptr_t)a0));
+    f->flags = (int)a1;
+    f->offset = -1;
+
+    table[(int)ret] = f;
+    return;
+  }
+  if (is_mmap_syscall(no, arch) && ret >= 0) {
+    // mmap(addr, len, prot, flags, fd, off): remember where a memfd lands so
+    // materialize can reopen the same object through /proc/self/map_files.
+    int fd = (int)r.arg5_signed();
+    auto it2 = table.find(fd);
+    if (fd >= 0 && it2 != table.end() && it2->second->type == OpenFile::MEMFD &&
+        it2->second->map_start == 0) {
+      it2->second->map_start = (uint64_t)ret;
+      it2->second->map_len = ((uint64_t)a1 + 4095) & ~4095ULL;
+    }
+    return;
+  }
+
   if ((is_socket_syscall(no, arch) || is_socketpair_syscall(no, arch) ||
     is_pipe_syscall(no, arch) || is_pipe2_syscall(no, arch) ||
     is_accept_syscall(no, arch) || is_accept4_syscall(no, arch) ||
@@ -281,7 +306,8 @@ bool FdModel::materialize(Task* t) {
     int fd = entry.first;
     const auto& file = entry.second;
 
-    if (file->offset < 0 && !(file->flags & O_APPEND)) {
+    if (file->type == OpenFile::REGULAR && file->offset < 0 &&
+        !(file->flags & O_APPEND)) {
       LOG(error) << "Cannot restore fd " << fd << ": file offset is unknown";
       return false;
     }
@@ -351,6 +377,19 @@ bool FdModel::materialize(Task* t) {
             LOG(error) << "connect for fd " << kv.first << " failed: " << errno_name(-c);
             return false;
           }
+        }
+      } else if (f->type == OpenFile::MEMFD) {
+        if (f->map_start) {
+          char p[80];
+          snprintf(p, sizeof p, "/proc/self/map_files/%llx-%llx",
+                   (unsigned long long)f->map_start,
+                   (unsigned long long)(f->map_start + f->map_len));
+          AutoRestoreMem path_mem(remote, p);
+          r = remote.syscall(openat_nr, AT_FDCWD, path_mem.get().as_int(), O_RDWR, 0);
+        } else {
+          AutoRestoreMem name_mem(remote, f->path.c_str());
+          r = remote.syscall(syscall_number_for_memfd_create(arch),
+                             name_mem.get().as_int(), f->flags);
         }
       } else {
         AutoRestoreMem path_mem(remote, f->path.c_str());

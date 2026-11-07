@@ -55,6 +55,7 @@ public:
       SIGNALFD,
       EPOLL,
       UNIX_DGRAM,
+      MEMFD,
       UNSUPPORTED
     };
     Type type = REGULAR;
@@ -68,6 +69,7 @@ public:
     std::map<EpollKey, EpollMember, EpollKeyLess> epoll_members;
     std::string origin;
     std::vector<uint8_t> addr;
+    uint64_t map_start = 0, map_len = 0;
   };
 
   explicit FdModel(const std::string& initial_cwd) : cwd(initial_cwd) {}
