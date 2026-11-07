@@ -43,10 +43,6 @@ static bool exit_effect_covered(int no, SupportedArch a) {
 vector<string> DetachCheck::run(const vector<Task*>& tasks, const FdModel& model) {
   vector<string> out;
   for (Task* t : tasks) {
-    if (!t->syscallbuf_child.is_null()) {
-      out.push_back("tid " + to_string(t->rec_tid) +
-                    ": syscallbuf is active; record with rr record -n");
-    }
     auto it = last.find(t->rec_tid);
     if (it != last.end() && it->second.exiting &&
         !exit_effect_covered(it->second.number, t->arch())) {

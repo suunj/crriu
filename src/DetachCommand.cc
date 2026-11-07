@@ -7,6 +7,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <set>
+#include <fstream>
 
 #include "AutoRemoteSyscalls.h"
 #include "Command.h"
@@ -16,7 +17,9 @@
 #include "DetachCheck.h"
 #include "ReplaySession.h"
 #include "ReplayTask.h"
+#include "AddressSpace.h"
 #include "rr/rr.h"
+#include "preload/preload_interface.h"
 #include "core.h"
 #include "log.h"
 #include "main.h"
@@ -78,6 +81,43 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
       DEBUG_ASSERT(0 && "Unknown option");
   }
   return true;
+}
+
+static void restore_patched_code(Task* t) {
+  for (const auto& m : t->vm()->maps()) {
+    const KernelMapping& km = m.map;
+
+    if (!(km.prot() & PROT_EXEC) || km.fsname().empty() || km.fsname()[0] != '/') {
+      continue;
+    }
+    ScopedFd fd(km.fsname().c_str(), O_RDONLY);
+    if (!fd.is_open()) {
+      continue;
+    }
+
+    std::vector<uint8_t> file(km.size());
+    ssize_t n = pread(fd, file.data(), file.size(), km.file_offset_bytes());
+    if (n <= 0) {
+      continue;
+    }
+    std::vector<uint8_t> mem(n);
+    t->read_bytes_helper(km.start().cast<uint8_t>(), n, mem.data());
+    for (ssize_t i = 0; i < n;) {
+      if (mem[i] == file[i]) {
+        ++i;
+        continue;
+      }
+      ssize_t j = i;
+      while (j < n && mem[j] != file[j]) {
+        ++j;
+      }
+      t->write_bytes_helper(km.start().cast<uint8_t>() + i, j - i, &file[i]);
+
+      LOG(debug) << "restored " << (j - i) << " patched bytes at "
+                 << HEX(km.start().as_int() + i) << " in " << km.fsname();
+      i = j;
+    }
+  }
 }
 
 static int detach(const string& trace_dir, const DetachFlags& flags) {
@@ -248,7 +288,15 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   }
 
   // 4. Restore registers and detach all tasks.
+  std::set<AddressSpace*> unpatched;
   for (Task* t : tasks) {
+    t->set_in_diversion(true);
+
+    if (unpatched.insert(t->vm().get()).second) {
+      restore_patched_code(t);
+    }
+    t->write_mem(remote_ptr<unsigned char>(RR_PAGE_IN_REPLAY_FLAG), (unsigned char)0);
+
     t->reenable_cpuid_tsc();
 
     // Replay never lets a syscall actually execute, but the tracee may be
