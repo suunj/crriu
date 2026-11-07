@@ -231,12 +231,29 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
       }
     }
   }
+  if ((is_socket_syscall(no, arch) || is_socketpair_syscall(no, arch) ||
+    is_pipe_syscall(no, arch) || is_pipe2_syscall(no, arch) ||
+    is_accept_syscall(no, arch) || is_accept4_syscall(no, arch) ||
+    is_timerfd_create_syscall(no, arch) || is_memfd_create_syscall(no, arch) ||
+    is_inotify_init1_syscall(no, arch) || is_userfaultfd_syscall(no, arch) ||
+    is_perf_event_open_syscall(no, arch) || is_io_uring_setup_syscall(no, arch)) &&
+    frame.regs().syscall_result_signed() >= 0) {
+
+    auto f = std::make_shared<OpenFile>();
+    f->type = OpenFile::UNSUPPORTED;
+    f->origin = syscall_name(no, arch);
+    table[frame.regs().syscall_result()] = f;
+  }
   // TODO: fcntl(F_DUPFD*), pread/pwrite (no offset change), readv/writev,
   //       openat2, pipe/socket (kind != regular file), fchdir.
 }
 
 bool FdModel::materialize(Task* t) {
-  auto& table = task_tables.at(t->rec_tid)->fds;
+  std::map<int, OpenFilePtr> table;
+
+  for (const auto& kv : task_tables.at(t->rec_tid)->fds) {
+    if (kv.second->type != OpenFile::UNSUPPORTED) table[kv.first] = kv.second;
+  }
   if (table.empty())
     return true;
 

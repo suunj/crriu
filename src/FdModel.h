@@ -53,7 +53,8 @@ public:
       REGULAR,
       EVENTFD,
       SIGNALFD,
-      EPOLL
+      EPOLL,
+      UNSUPPORTED
     };
     Type type = REGULAR;
 
@@ -64,6 +65,7 @@ public:
     uint64_t sigmask = 0;  // SIGNALFD
 
     std::map<EpollKey, EpollMember, EpollKeyLess> epoll_members;
+    std::string origin;
   };
 
   explicit FdModel(const std::string& initial_cwd) : cwd(initial_cwd) {}

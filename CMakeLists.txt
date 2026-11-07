@@ -673,6 +673,7 @@ set(RR_SOURCES
   src/ReplayTimeline.cc
   src/RerunCommand.cc
   src/DetachCommand.cc
+  src/DetachCheck.cc
   src/FdModel.cc
   src/SignalModel.cc
   src/ReturnAddressList.cc

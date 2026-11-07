@@ -13,6 +13,7 @@
 #include "FdModel.h"
 #include "FdTable.h"
 #include "SignalModel.h"
+#include "DetachCheck.h"
 #include "ReplaySession.h"
 #include "ReplayTask.h"
 #include "rr/rr.h"
@@ -43,7 +44,8 @@ DetachCommand DetachCommand::singleton(
 struct DetachFlags {
   FrameTime event;
   string cwd;
-  DetachFlags() : event(0) {}
+  bool strict;
+  DetachFlags() : event(0), strict(false) {}
 };
 
 static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
@@ -52,6 +54,7 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
   }
   static const OptionSpec options[] = {
     { 'c', "cwd", HAS_PARAMETER },
+    { 's', "strict", NO_PARAMETER },
     { 'e', "event", HAS_PARAMETER },
   };
   ParsedOption opt;
@@ -61,6 +64,9 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
   switch (opt.short_name) {
     case 'c':
       flags.cwd = opt.value;
+      break;
+    case 's':
+      flags.strict = true;
       break;
     case 'e':
       if (!opt.verify_valid_int(1, INT64_MAX)) {
@@ -108,6 +114,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     };
 
   SignalModel sigs;
+  DetachCheck check;
 
   // 1. Replay until event `flags.event` has been fully replayed, i.e. the
   //    trace reader has moved past it.
@@ -122,6 +129,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     if (cur) {
       model.observe(session->current_trace_frame(), cur);
       sigs.observe(session->current_trace_frame(), cur);
+      check.observe(session->current_trace_frame(), cur);
     }
   }
 
@@ -142,6 +150,12 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   }
 
   pid_t real_pid = tasks[0]->tid;
+
+  // 2b. Is this state safe to hand to the kernel?
+  for (const string& f : check.run(tasks, model)) {
+    fprintf(stderr, "rr detach: %s%s\n", flags.strict ? "" : "warning: ", f.c_str());
+    if (flags.strict) return 1;
+  }
 
   // 3. Close rr-internal FDs once per shared file table.
   std::set<FdTable*> done_tables;
