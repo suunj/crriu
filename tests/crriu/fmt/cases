@@ -1,0 +1,11 @@
+# name | trace | SEL | nspid | INJECT | expected (grep -E on the output after restore) | wait after INJECT (s, default 8)
+threads   | /root/.local/share/rr/threads-4                 | 210                    | 122126 |                 | thread 1: 39
+x86-tiny  | /root/.local/share/rr/qemu-system-x86_64-4      | 250000                 | 175421 |                 | guest tick 14
+rv-tiny   | /root/.local/share/rr/qemu-system-riscv64-0     | guest tick 5           | 252613 |                 | guest tick 6
+trixie    | /root/.local/share/rr/trixie-qemu.sh-2          | job control turned off | 260373 | uname -a        | riscv64 GNU/Linux
+pmu       | /root/.local/share/rr/pmu-qemu.sh-0              | pmu 5                  | 270824 |                 | pmu 20 cycles=4214792 instr=512467
+kvm       | /root/.local/share/rr/trixie-qemu.sh-2          | job control turned off | 260373 | /root/dirty_log_perf_test -v 1 -b 4M -i 2 2>&1; echo RC=$? | ^RC=0 | 900
+pmuovf    | /root/.local/share/rr/pmuovf-qemu.sh-0           | pmuovf 5               | 272073 |                 | pmuovf 20 cycles=1628504152 overflows=456 |
+l2-pmu    | /root/.local/share/rr/trixie-qemu-plic.sh-0     | pmu 5                  | 285507 |                 | pmu 20 cycles=13980144 instr=1720281 | 150
+l2-ovf    | /root/.local/share/rr/trixie-qemu.sh-4          | pmuovf 5               | 290000 |                 | pmuovf 20 cycles=1015528 overflows=19 samples_bytes=160 | 200
+systemd-emerg | /root/.local/share/rr/trixie-qemu-systemd.sh-0 | Press Enter for system maintenance | 293226 | echo CRRIU-EMERG | root@syzkaller:~# | 60
