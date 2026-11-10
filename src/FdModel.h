@@ -56,6 +56,7 @@ public:
       EPOLL,
       UNIX_DGRAM,
       MEMFD,
+      STDIO,
       UNSUPPORTED
     };
     Type type = REGULAR;
@@ -65,6 +66,8 @@ public:
     int64_t offset = 0;
     uint64_t counter = 0;  // EVENTFD
     uint64_t sigmask = 0;  // SIGNALFD
+    bool seekable = true;
+    int stdio_fd = -1;
 
     std::map<EpollKey, EpollMember, EpollKeyLess> epoll_members;
     std::string origin;
@@ -92,6 +95,14 @@ public:
   const std::map<int, OpenFilePtr>& fds(Task* t) const;
 
   const void* table_id(Task* t) const;
+
+  std::shared_ptr<OpenFile> stdio_alias(int fd) {
+      auto f = std::make_shared<OpenFile>();
+      f->type = OpenFile::STDIO;
+      f->stdio_fd = fd;
+      f->origin = "dup of stdio " + std::to_string(fd);
+      return f;
+  }
 
 private:
   std::string resolve(Task* t, int dirfd, uintptr_t path_ptr);

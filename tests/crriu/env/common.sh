@@ -4,4 +4,4 @@
 : "${CRRIU_STDIN:=/tmp/qemu-stdin}" # fifo handed to the tracee as stdin
 : "${CRRIU_LOG:=/tmp/detach.log}"
 : "${CRRIU_IMG:=/tmp/crriu-img}"
-[ -p "$CRRIU_STDIN" ] || mkfifo "$CRRIU_STDIN"
+[ -p "$CRRIU_STDIN" ] || { rm -f "$CRRIU_STDIN"; mkfifo "$CRRIU_STDIN"; }

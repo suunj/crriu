@@ -69,6 +69,9 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
       return;
     auto f = make_shared<OpenFile>();
     f->path = resolve(t, (int)a0, (uintptr_t)a1);
+    struct stat st;
+    if (stat(f->path.c_str(), &st) == 0 && !S_ISREG(st.st_mode))
+        f->seekable = false;
     f->flags = (int)a2;
     f->offset = 0;
     table[(int)ret] = f;
@@ -118,22 +121,30 @@ void FdModel::observe(const TraceFrame& frame, Task* t) {
         }
       }
     }
-  } else if (no == syscall_number_for_dup(arch)) {
-    if (ret >= 0 && table.count((int)a0))
-      table[(int)ret] = table[(int)a0];
+  } else if (no == syscall_number_for_dup(arch) ||
+             (no == syscall_number_for_fcntl(arch) &&
+              (a1 == F_DUPFD || a1 == F_DUPFD_CLOEXEC))) {
+    if (ret >= 0) {
+      int oldfd = (int)a0;
+      auto it = table.find(oldfd);
+      if (it != table.end())
+        table[(int)ret] = it->second;
+      else if (oldfd <= 2)
+        table[(int)ret] = stdio_alias(oldfd);   // QEMU: fcntl(1, F_DUPFD_CLOEXEC) for the stdio chardev
+      else
+        table.erase((int)ret);
+    }
   } else if (no == syscall_number_for_dup2(arch) ||
     no == syscall_number_for_dup3(arch)) {
     if (ret >= 0) {
       int oldfd = (int)a0;
       int newfd = (int)a1;
-
       auto it = table.find(oldfd);
-
       if (it != table.end()) {
         table[newfd] = it->second;
+      } else if (oldfd <= 2) {
+        table[newfd] = stdio_alias(oldfd);
       } else {
-        // The source FD exists in the tracee but is not modeled.
-        // Its duplicate must not retain a stale mapping.
         table.erase(newfd);
       }
     }
@@ -403,6 +414,11 @@ bool FdModel::materialize(Task* t) {
           r = remote.syscall(syscall_number_for_memfd_create(arch),
                              name_mem.get().as_int(), f->flags);
         }
+      } else if (f->type == OpenFile::STDIO) {
+        // A duplicate of the tracee's stdio (QEMU's stdio chardev does
+        // fcntl(1, F_DUPFD_CLOEXEC)). The tracee's current fd 0/1/2 is
+        // whatever detach handed it, so clone that instead of reopening.
+        r = f->stdio_fd;
       } else {
         AutoRestoreMem path_mem(remote, f->path.c_str());
         r = remote.syscall(
@@ -438,7 +454,7 @@ bool FdModel::materialize(Task* t) {
       break;
     }
 
-    if (remote.syscall(close_nr, r) < 0) {
+    if (f->type != OpenFile::STDIO && remote.syscall(close_nr, r) < 0) {
       LOG(error) << "close(" << r << ") failed";
       ok = false;
       break;
@@ -447,15 +463,21 @@ bool FdModel::materialize(Task* t) {
     temporary[f] = (int)tmp;
     temp_fds.insert((int)tmp);
 
-    if (f->type != OpenFile::REGULAR) {
+    if (f->type != OpenFile::REGULAR || !f->seekable) {
       // Only regular files have an offset to restore.
-    } else if (f->offset >= 0) {
+    } else if (f->offset > 0) {
       long pos = remote.syscall(syscall_number_for_lseek(arch), tmp, f->offset, SEEK_SET);
 
-      if (pos != f->offset) {
-        LOG(error) << "lseek failed: " << pos;
+      if (pos < 0) {
+        LOG(error) << "lseek(" << f->path << ") failed: " << pos;
         ok = false;
         break;
+      }
+      if (pos != f->offset) {
+        // noop_llseek (char devices such as /dev/urandom) accepts the seek
+        // but leaves f_pos alone; the offset is meaningless there.
+        LOG(warn) << "lseek(" << f->path << ") returned " << pos
+                  << " for offset " << f->offset << "; unseekable, continuing";
       }
     } else if (f->flags & O_APPEND) {
       long pos = remote.syscall(
