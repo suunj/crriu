@@ -49,6 +49,7 @@ struct DetachFlags {
   string cwd;
   bool strict;
   vector<string> until_outputs;
+  string output_dir;
   DetachFlags() : event(0), strict(false) {}
 };
 
@@ -61,6 +62,7 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
     { 's', "strict", NO_PARAMETER },
     { 'e', "event", HAS_PARAMETER },
     { 'u', "until-output", HAS_PARAMETER },
+    { 'o', "output-dir", HAS_PARAMETER },
   };
   ParsedOption opt;
   if (!Command::parse_option(args, options, &opt)) {
@@ -81,6 +83,9 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
       break;
     case 'u':
       flags.until_outputs.push_back(opt.value);
+      break;
+    case 'o':
+      flags.output_dir = opt.value;
       break;
     default:
       DEBUG_ASSERT(0 && "Unknown option");
@@ -125,9 +130,39 @@ static void restore_patched_code(Task* t) {
   }
 }
 
+static bool open_branch_stdio(const string& dir, size_t k, FdModel& model,
+                              ScopedFd& in, ScopedFd& out, string& stdio_note) {
+  if (dir.empty()) {
+    return true;
+  }
+  char base[PATH_MAX];
+  snprintf(base, sizeof base, "%s/branch-%zu", dir.c_str(), k);
+  string fifo = string(base) + ".stdin", log = string(base) + ".log";
+
+  struct stat st;
+  if (stat(fifo.c_str(), &st) < 0 || !S_ISFIFO(st.st_mode)) {
+    unlink(fifo.c_str());
+    if (mkfifo(fifo.c_str(), 0600) < 0) {
+      fprintf(stderr, "rr detach: mkfifo %s: %s\n", fifo.c_str(), strerror(errno));
+      return false;
+    }
+  }
+  in = ScopedFd(open(fifo.c_str(), O_RDWR | O_CLOEXEC));
+  out = ScopedFd(open(log.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644));
+  if (!in.is_open() || !out.is_open()) {
+    fprintf(stderr, "rr detach: can't open %s: %s\n", base, strerror(errno));
+    return false;
+  }
+  model.set_stdio_target(0, &in);
+  model.set_stdio_target(1, &out);
+  model.set_stdio_target(2, &out);
+  stdio_note = string(" stdio ") + base;
+  return true;
+}
+
 static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
                     DetachCheck& check, const DetachFlags& flags,
-                    FrameTime stopped_at, const char* what) {
+                    FrameTime stopped_at, const char* tag) {
   // 2. Collect tasks.
   vector<Task*> tasks;
   for (auto& it : session.tasks()) {
@@ -287,7 +322,7 @@ static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
 
 
   printf("detached pid %d after event %lld (%zu threads)%s\n",
-          real_pid, (long long)stopped_at, tasks.size(), what);
+          real_pid, (long long)stopped_at, tasks.size(), tag);
   fflush(stdout);
   return 0;
 }
@@ -392,21 +427,35 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
       ReplaySession::shr_ptr clone = session->clone();
       clones.push_back(clone);
 
-      char what[160];
-      snprintf(what, sizeof what, " [clone %zu: '%s']", next_pattern + 1,
-              flags.until_outputs[next_pattern].c_str());
-      int rc = hand_off(*clone, model, sigs, check, flags, stopped_at, what);
-      if (rc)
-          return rc;
+      {
+          ScopedFd bin, bout;
+          string stdio_note;
+          if (!open_branch_stdio(flags.output_dir, next_pattern + 1, model, bin, bout, stdio_note))
+              return 1;
+          char tag[PATH_MAX + 64];
+          snprintf(tag, sizeof tag, " [clone %zu: '%s']%s", next_pattern + 1,
+                  flags.until_outputs[next_pattern].c_str(), stdio_note.c_str());
+          int rc = hand_off(*clone, model, sigs, check, flags, stopped_at, tag);
+          model.clear_stdio_targets();
+          if (rc)
+              return rc;
+      }
 
       next_pattern++;
       hit = false;
       seen.clear();
   }
 
-  int rc = hand_off(*session, model, sigs, check, flags, stopped_at, "");
-  if (rc)
-      return rc;
+  {
+      ScopedFd bin, bout;
+      string stdio_note;
+      if (!open_branch_stdio(flags.output_dir, npatterns ? npatterns : 1, model, bin, bout, stdio_note))
+          return 1;
+      int rc = hand_off(*session, model, sigs, check, flags, stopped_at, stdio_note.c_str());
+      model.clear_stdio_targets();
+      if (rc)
+          return rc;
+  }
 
   // 5. Keep rr alive until the tracees are handed off.
   while (true) {

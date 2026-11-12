@@ -100,6 +100,14 @@ public:
       materialized_files.clear();
   }
 
+  void set_stdio_target(int fd, const ScopedFd* f) {
+      stdio_target[fd] = f;
+  }
+
+  void clear_stdio_targets() {
+      stdio_target[0] = stdio_target[1] = stdio_target[2] = nullptr;
+  }
+
   std::shared_ptr<OpenFile> stdio_alias(int fd) {
       auto f = std::make_shared<OpenFile>();
       f->type = OpenFile::STDIO;
@@ -122,6 +130,8 @@ private:
   int64_t last_time = 0;
 
   std::map<OpenFile*, ScopedFd> materialized_files;
+
+  const ScopedFd* stdio_target[3] = { nullptr, nullptr, nullptr };
 };
 
 } // namespace rr

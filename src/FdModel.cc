@@ -343,6 +343,12 @@ bool FdModel::materialize(Task* t) {
   const int dup2_nr = syscall_number_for_dup2(arch);
   const int openat_nr = syscall_number_for_openat(arch);
 
+  for (int fd = 0; fd < 3; fd++) {
+      if (stdio_target[fd]) {
+          remote.infallible_send_fd_dup(*stdio_target[fd], fd, 0);
+      }
+  }
+
   // Reserve a temporary FD range above every target FD.
   int max_fd = table.rbegin()->first;
   if (max_fd == std::numeric_limits<int>::max())
@@ -415,18 +421,15 @@ bool FdModel::materialize(Task* t) {
                              name_mem.get().as_int(), f->flags);
         }
       } else if (f->type == OpenFile::STDIO) {
-        // A duplicate of the tracee's stdio (QEMU's stdio chardev does
-        // fcntl(1, F_DUPFD_CLOEXEC)). The tracee's current fd 0/1/2 is
-        // whatever detach handed it, so clone that instead of reopening.
-        r = f->stdio_fd;
+          r = f->stdio_fd;
       } else {
-        AutoRestoreMem path_mem(remote, f->path.c_str());
-        r = remote.syscall(
-          openat_nr,
-          AT_FDCWD,
-          path_mem.get().as_int(),
-          f->flags & ~(O_CREAT | O_TRUNC | O_EXCL),
-          0);
+          AutoRestoreMem path_mem(remote, f->path.c_str());
+          r = remote.syscall(
+                  openat_nr,
+                  AT_FDCWD,
+                  path_mem.get().as_int(),
+                  f->flags & ~(O_CREAT | O_TRUNC | O_EXCL),
+                  0);
       }
 
       if (r >= 0) {
