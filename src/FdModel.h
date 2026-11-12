@@ -96,6 +96,10 @@ public:
 
   const void* table_id(Task* t) const;
 
+  void forget_materialized() {
+      materialized_files.clear();
+  }
+
   std::shared_ptr<OpenFile> stdio_alias(int fd) {
       auto f = std::make_shared<OpenFile>();
       f->type = OpenFile::STDIO;

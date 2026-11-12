@@ -2844,25 +2844,24 @@ Task* Task::os_clone_into(const CapturedState& state,
   auto fdtable_entry = cloned_fd_tables.find(state.fdtable_identity);
   DEBUG_ASSERT(fdtable_entry != cloned_fd_tables.end() &&
                "All captured fd tables should be in cloned_fd_tables");
-  return os_clone(Task::SESSION_CLONE_NONLEADER, &remote.task()->session(),
-                  remote, state.rec_tid, state.serial,
-                  // We don't actually /need/ to specify the
-                  // SIGHAND/SYSVMEM flags because those things
-                  // are emulated in the tracee.  But we use the
-                  // same flags as glibc to be on the safe side
-                  // wrt kernel bugs.
-                  //
-                  // We don't pass CLONE_SETTLS here *only*
-                  // because we'll do it later in
-                  // |copy_state()|.
-                  //
-                  // See |os_fork_into()| above for discussion
-                  // of the CTID flags.
-                  (CLONE_VM | CLONE_FS | CLONE_SIGHAND |
-                   CLONE_SYSVSEM),
-                  fdtable_entry->second,
-                  std::move(new_tg),
-                  state.top_of_stack);
+
+  unsigned flags = CLONE_VM | CLONE_FS | CLONE_SIGHAND | CLONE_SYSVSEM;
+  FdTable::shr_ptr new_fds = fdtable_entry->second;
+
+  Task* leader = remote.task();
+  ReplaySession* rs = leader->session().as_replay();
+  if (rs && rs->flags().preserve_thread_groups) {
+    flags |= CLONE_THREAD;
+    new_tg = nullptr;                       // Task::clone takes the leader's tg
+    if (new_fds == leader->fd_table()) {
+      flags |= CLONE_FILES;
+      new_fds = nullptr;                    // Task::clone takes the leader's fds
+    }
+  }
+
+  return os_clone(Task::SESSION_CLONE_NONLEADER, &leader->session(), remote,
+                  state.rec_tid, state.serial, flags, std::move(new_fds),
+                  std::move(new_tg), state.top_of_stack);
 }
 
 template <typename Arch>

@@ -48,7 +48,7 @@ struct DetachFlags {
   FrameTime event;
   string cwd;
   bool strict;
-  string until_output;
+  vector<string> until_outputs;
   DetachFlags() : event(0), strict(false) {}
 };
 
@@ -80,7 +80,7 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
       flags.event = opt.int_value;
       break;
     case 'u':
-      flags.until_output = opt.value;
+      flags.until_outputs.push_back(opt.value);
       break;
     default:
       DEBUG_ASSERT(0 && "Unknown option");
@@ -125,92 +125,12 @@ static void restore_patched_code(Task* t) {
   }
 }
 
-static int detach(const string& trace_dir, const DetachFlags& flags) {
-  ReplaySession::Flags session_flags;
-  session_flags.preserve_thread_groups = true;
-  // Echo recorded stdout/stderr writes during replay so that console output
-  // up to the detach point ends up where the tracee's stdio points.
-  session_flags.redirect_stdio = true;
-  ReplaySession::shr_ptr session =
-      ReplaySession::create(trace_dir, session_flags);
-
-  //FdModel model(session->trace_reader().initial_cwd());
-  string cwd = flags.cwd;
-  if (!cwd.empty() && cwd[0] != '/') {
-    fprintf(stderr,
-            "rr detach: --cwd requires an absolute path\n");
-    return 1;
- }
-
-  if (cwd.empty()) {
-    char link[64], buf[PATH_MAX];
-    snprintf(link, sizeof link, "/proc/%d/cwd", session->current_task()->tid);
-    ssize_t n = readlink(link, buf, sizeof buf - 1);
-
-    if (n < 0) {
-      fprintf(stderr, "rr detach: can't read tracee cwd: %s\n", strerror(errno)); return 1;
-    }
-    cwd.assign(buf, n);
-    fprintf(stderr, "rr detach: assuming recording cwd %s; pass --cwd if different\n", cwd.c_str());
-  }
-  FdModel model(cwd);
-  model.init_task(session->current_task());
-
-  session->on_task_cloned =
-    [&](Task* parent, Task* child, int flags) {
-      model.fork_task(parent, child, flags);
-    };
-
-  SignalModel sigs;
-  DetachCheck check;
-
-  // 1. Replay until event `flags.event` has been fully replayed, i.e. the
-  //    trace reader has moved past it.
-  FrameTime stop_at = flags.event;
-  string seen;
-  bool hit = false;
-
-  if (!flags.until_output.empty()) {
-    stop_at = INT64_MAX;
-    session->on_stdio_output = [&](int, const vector<uint8_t>& b) {
-      if (hit)
-        return;
-
-      seen.append(b.begin(), b.end());
-
-      if (seen.find(flags.until_output) != string::npos)
-        hit = true;
-      if (seen.size() > 65536)
-        seen.erase(0, seen.size() - 32768);
-    };
-  }
-
-  FrameTime stopped_at = 0;
-  while (session->trace_reader().time() <= stop_at) {
-    // current_trace_frame() is the frame about to be replayed; feed it to
-    // the models now so they stay exactly in step with what has run.
-    if (Task* cur = session->current_task()) {
-      model.observe(session->current_trace_frame(), cur);
-      sigs.observe(session->current_trace_frame(), cur);
-      check.observe(session->current_trace_frame(), cur);
-    }
-    auto result = session->replay_step(RUN_CONTINUE);
-    if (result.status == REPLAY_EXITED) {
-      fprintf(stderr, "rr detach: trace ended before %s\n",
-              hit || flags.until_output.empty() ? "the target event" : "the output appeared");
-
-      return 1;
-    }
-    // The reader has moved on to the next frame; the one just replayed is
-    // the frame before it.
-    stopped_at = session->trace_reader().time() - 1;
-    if (hit)
-      break;
-  }
-
+static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
+                    DetachCheck& check, const DetachFlags& flags,
+                    FrameTime stopped_at, const char* what) {
   // 2. Collect tasks.
   vector<Task*> tasks;
-  for (auto& it : session->tasks()) {
+  for (auto& it : session.tasks()) {
     tasks.push_back(it.second);
   }
 
@@ -221,11 +141,12 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
 
   pid_t real_pid = tasks[0]->tid;
 
-  // 2b. Is this state safe to hand to the kernel?
   for (const string& f : check.run(tasks, model)) {
     fprintf(stderr, "rr detach: %s%s\n", flags.strict ? "" : "warning: ", f.c_str());
     if (flags.strict) return 1;
   }
+
+  model.forget_materialized();
 
   // 3. Close rr-internal FDs once per shared file table.
   std::set<FdTable*> done_tables;
@@ -349,6 +270,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
                << " ip=" << t->ip();
   }
 
+
   // 4b. Release all tasks, stopped.
   for (Task* t : tasks) {
     errno = 0;
@@ -363,9 +285,128 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     }
   }
 
-  printf("detached pid %d after event %lld (%zu threads)\n",
-       real_pid, (long long)stopped_at, tasks.size());
+
+  printf("detached pid %d after event %lld (%zu threads)%s\n",
+          real_pid, (long long)stopped_at, tasks.size(), what);
   fflush(stdout);
+  return 0;
+}
+
+static int detach(const string& trace_dir, const DetachFlags& flags) {
+  ReplaySession::Flags session_flags;
+  session_flags.preserve_thread_groups = true;
+  // Echo recorded stdout/stderr writes during replay so that console output
+  // up to the detach point ends up where the tracee's stdio points.
+  session_flags.redirect_stdio = true;
+  ReplaySession::shr_ptr session =
+      ReplaySession::create(trace_dir, session_flags);
+
+  //FdModel model(session->trace_reader().initial_cwd());
+  string cwd = flags.cwd;
+  if (!cwd.empty() && cwd[0] != '/') {
+    fprintf(stderr,
+            "rr detach: --cwd requires an absolute path\n");
+    return 1;
+ }
+
+  if (cwd.empty()) {
+    char link[64], buf[PATH_MAX];
+    snprintf(link, sizeof link, "/proc/%d/cwd", session->current_task()->tid);
+    ssize_t n = readlink(link, buf, sizeof buf - 1);
+
+    if (n < 0) {
+      fprintf(stderr, "rr detach: can't read tracee cwd: %s\n", strerror(errno)); return 1;
+    }
+    cwd.assign(buf, n);
+    fprintf(stderr, "rr detach: assuming recording cwd %s; pass --cwd if different\n", cwd.c_str());
+  }
+  FdModel model(cwd);
+  model.init_task(session->current_task());
+
+  session->on_task_cloned =
+    [&](Task* parent, Task* child, int flags) {
+        model.fork_task(parent, child, flags);
+    };
+
+  SignalModel sigs;
+  DetachCheck check;
+
+  // 1. Replay until event `flags.event` has been fully replayed, or until
+  //    each of the -u strings has appeared. Every match but the last forks
+  //    the replay (ReplaySession::clone) and detaches the fork; the replay
+  //    itself continues and is detached at the last match.
+  FrameTime stop_at = flags.event;
+  string seen;
+  bool hit = false;
+  size_t next_pattern = 0;
+  const size_t npatterns = flags.until_outputs.size();
+
+  if (npatterns) {
+      stop_at = INT64_MAX;
+      session->on_stdio_output = [&](int, const vector<uint8_t>& b) {
+          if (hit)
+              return;
+
+          seen.append(b.begin(), b.end());
+
+          if (seen.find(flags.until_outputs[next_pattern]) != string::npos)
+              hit = true;
+          if (seen.size() > 65536)
+              seen.erase(0, seen.size() - 32768);
+      };
+  }
+
+  // Clone sessions must outlive the detached processes: destroying a
+  // ReplaySession tries to kill its tasks.
+  vector<ReplaySession::shr_ptr> clones;
+
+  FrameTime stopped_at = 0;
+  while (session->trace_reader().time() <= stop_at) {
+      // current_trace_frame() is the frame about to be replayed; feed it to
+      // the models now so they stay exactly in step with what has run.
+      if (Task* cur = session->current_task()) {
+          model.observe(session->current_trace_frame(), cur);
+          sigs.observe(session->current_trace_frame(), cur);
+          check.observe(session->current_trace_frame(), cur);
+      }
+      auto result = session->replay_step(RUN_CONTINUE);
+      if (result.status == REPLAY_EXITED) {
+          fprintf(stderr, "rr detach: trace ended before %s\n",
+                  npatterns ? "the output appeared" : "the target event");
+          return 1;
+      }
+      // The reader has moved on to the next frame; the one just replayed is
+      // the frame before it.
+      stopped_at = session->trace_reader().time() - 1;
+
+      if (!hit)
+          continue;
+
+      if (next_pattern + 1 == npatterns)
+          break;                         // last pattern: detach the replay itself
+
+      // Intermediate pattern: fork the replay and detach the fork.
+      if (!session->can_clone())
+          continue;                      // not at a stable point yet; step on
+
+      ReplaySession::shr_ptr clone = session->clone();
+      clones.push_back(clone);
+
+      char what[160];
+      snprintf(what, sizeof what, " [clone %zu: '%s']", next_pattern + 1,
+              flags.until_outputs[next_pattern].c_str());
+      int rc = hand_off(*clone, model, sigs, check, flags, stopped_at, what);
+      if (rc)
+          return rc;
+
+      next_pattern++;
+      hit = false;
+      seen.clear();
+  }
+
+  int rc = hand_off(*session, model, sigs, check, flags, stopped_at, "");
+  if (rc)
+      return rc;
 
   // 5. Keep rr alive until the tracees are handed off.
   while (true) {
@@ -379,7 +420,7 @@ int DetachCommand::run(vector<string>& args) {
   DetachFlags flags;
   while (parse_detach_arg(args, flags)) {
   }
-  if (!flags.event && flags.until_output.empty()) {
+  if (!flags.event && flags.until_outputs.empty()) {
     print_help(stderr);
     return 1;
   }
