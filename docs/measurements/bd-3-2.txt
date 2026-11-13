@@ -1,0 +1,48 @@
+=== branches 195045 / 99941  (2026-11-13 14:29:38)
+
+--- memory (cowmap)
+pid 195045:  Rss: 927.4 MiB  Pss: 393.5 MiB  Shared_Dirty: 844.4 MiB  Private_Dirty: 20.2 MiB
+pid 99941:  Rss: 973.3 MiB  Pss: 440.1 MiB  Shared_Dirty: 843.0 MiB  Private_Dirty: 81.8 MiB
+
+55ac5cd3b000 r-xp /home/suun shared      9.3 MiB  diverged      0.0 MiB  A-only     0.0  B-only     0.0  absent      0.0   [100.0% of present still shared]
+55ac5d68e000 r--p /home/suun shared      0.2 MiB  diverged      0.0 MiB  A-only     5.0  B-only     0.0  absent      2.1   [  3.6% of present still shared]
+55ac648f6000 rw-p [anon]     shared      5.3 MiB  diverged      0.9 MiB  A-only     0.5  B-only     0.0  absent      4.6   [ 79.3% of present still shared]
+7faa30021000 ---p [anon]     shared      0.0 MiB  diverged      0.0 MiB  A-only     0.0  B-only     0.0  absent     63.9
+7faa35c65000 rw-p [anon]     shared     95.6 MiB  diverged      0.0 MiB  A-only     0.0  B-only     0.0  absent      0.0   [100.0% of present still shared]
+7faa3bc00000 rw-p [anon]     shared      0.0 MiB  diverged      0.0 MiB  A-only     0.0  B-only     0.0  absent     32.0
+7faa3de00000 rw-p [anon]     shared      0.0 MiB  diverged      0.0 MiB  A-only     0.0  B-only     0.0  absent     32.0
+7faa40000000 rw-p [anon]     shared      9.2 MiB  diverged      9.5 MiB  A-only     0.0  B-only     0.4  absent      0.0   [ 48.4% of present still shared]
+7faa45400000 rw-p [anon]     shared      0.0 MiB  diverged      0.0 MiB  A-only     0.0  B-only     0.0  absent      8.0   [ 25.0% of present still shared]
+7faa45c00000 rw-p [anon]     shared    356.9 MiB  diverged     31.1 MiB  A-only     0.0  B-only    21.5  absent    614.5   [ 87.2% of present still shared]
+
+  guest RAM candidate 7faa45c00000-7faa85c00000 (1024 MiB), divergence per 16.0 MiB bucket (pages touched on either side since fork):
+  +     0 MiB    0.3 MiB |#                                       |
+  +    48 MiB    9.9 MiB |####################################### |
+  +    64 MiB    7.5 MiB |#############################           |
+  +    96 MiB    0.3 MiB |#                                       |
+  +   112 MiB    2.2 MiB |########                                |
+  +   128 MiB    1.1 MiB |####                                    |
+  +   160 MiB    0.3 MiB |#                                       |
+  +   176 MiB   10.0 MiB |########################################|
+  +   192 MiB    7.6 MiB |##############################          |
+  +   512 MiB    3.6 MiB |##############                          |
+  +   800 MiB    2.1 MiB |########                                |
+  +   816 MiB    0.8 MiB |###                                     |
+  +   832 MiB    0.9 MiB |###                                     |
+  +   912 MiB    0.2 MiB |#                                       |
+  +   944 MiB    0.5 MiB |#                                       |
+  +   992 MiB    2.7 MiB |##########                              |
+  +  1008 MiB    2.2 MiB |########                                |
+
+7faa85e00000 r-xs /memfd:rr- shared      0.0 MiB  diverged    156.4 MiB  A-only    11.9  B-only    26.9  absent    828.7   [  0.0% of present still shared]
+7faac5e00000 rw-s /memfd:rr- shared      0.0 MiB  diverged    155.8 MiB  A-only    12.5  B-only    26.9  absent    828.7   [  0.0% of present still shared]
+7fab06200000 rw-p [anon]     shared      0.0 MiB  diverged      0.0 MiB  A-only     0.0  B-only     0.0  absent      8.0   [  0.0% of present still shared]
+TOTAL (common mappings)      shared    526.9 MiB  diverged    353.9 MiB  A-only    39.6  B-only    75.8  absent   2445.5   [ 52.9% of present still shared]
+
+--- TCG translation cache (tbstat)
+stat                     pid 195045      pid 99941            B-A
+tb_flush_count                    0              0             +0
+tb_invalidate_count           20847          20847             +0
+nb_tbs                       316762         366625         +49863
+code_size                 176514611      204771891      +28257280
+code_capacity            1073736704     1073736704             +0
