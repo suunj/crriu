@@ -2816,18 +2816,18 @@ bool Task::post_vm_clone(CloneReason reason, int flags, Task* origin) {
 
 Task* Task::os_fork_into(Session* session, FdTable::shr_ptr new_fds) {
   AutoRemoteSyscalls remote(this, AutoRemoteSyscalls::DISABLE_MEMORY_PARAMS);
+  unsigned flags = SIGCHLD;
+  ReplaySession* rs = this->session().as_replay();
+  if (rs && rs->flags().preserve_thread_groups) {
+    // Make the clone leader a sibling of this task (a child of rr) rather
+    // than its child, so that a detached clone is not part of the original
+    // tracee's process tree: criu dump -t <original> must not sweep the
+    // clones in, and killing the original must not orphan them.
+    flags |= CLONE_PARENT;
+  }
   Task* child =
       os_clone(Task::SESSION_CLONE_LEADER, session, remote, rec_tid, serial,
-               // Most likely, we'll be setting up a
-               // CLEARTID futex.  That's not done
-               // here, but rather later in
-               // |copy_state()|.
-               //
-               // We also don't use any of the SETTID
-               // flags because that earlier work will
-               // be copied by fork()ing the address
-               // space.
-               SIGCHLD,
+               flags,
                std::move(new_fds));
   // When we forked ourselves, the child inherited the setup we
   // did to make the clone() call.  So we have to "finish" the
