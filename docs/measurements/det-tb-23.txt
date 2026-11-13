@@ -1,0 +1,6 @@
+stat                     pid 102135      pid 64799            B-A
+tb_flush_count                    0              0             +0
+tb_invalidate_count           25807          25789            -18
+nb_tbs                       370778         369878           -900
+code_size                 207724451      206748499        -975952
+code_capacity            1073736704     1073736704             +0

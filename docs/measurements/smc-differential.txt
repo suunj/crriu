@@ -1,0 +1,37 @@
+# smc differential, smc1 trace, 7 branches @ 'MARK: smc -o 0x10 -m 0', -n 5000
+tb_flush_count                  0
+tb_invalidate_count         20778
+nb_tbs                     334749
+code_size               187219603
+code_capacity          1073736704
+
+== -o 0x10 -m 0
+tb_invalidate_count         25779
+nb_tbs                     350057
+code_size               194709619
+== -o 0xffc -m 0
+tb_invalidate_count         35775
+nb_tbs                     360951
+code_size               198844051
+== -o 0x10 -m 1
+tb_invalidate_count         25791
+nb_tbs                     352737
+code_size               196267987
+== -o 0x10 -m 2
+tb_invalidate_count         25783
+nb_tbs                     351885
+code_size               196132947
+== -o 0x10 -m 0 -a
+tb_invalidate_count         25787
+nb_tbs                     353265
+code_size               196740339
+== -o 0x10 -m 0 -t
+tb_invalidate_count         25777
+nb_tbs                     354479
+code_size               197103107
+== -o 0x10 -m 0 -F
+tb_invalidate_count         25791
+nb_tbs                     352499
+code_size               196337267
+
+# offsets 0xff8/0xffc/0x1000 -n 1000: +1998 / +3000 / +999 (TB split at page boundary, see notes)
