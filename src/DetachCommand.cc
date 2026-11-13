@@ -50,7 +50,8 @@ struct DetachFlags {
   bool strict;
   vector<string> until_outputs;
   string output_dir;
-  DetachFlags() : event(0), strict(false) {}
+  int clones;
+  DetachFlags() : event(0), strict(false), clones(1) {}
 };
 
 static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
@@ -63,6 +64,7 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
     { 'e', "event", HAS_PARAMETER },
     { 'u', "until-output", HAS_PARAMETER },
     { 'o', "output-dir", HAS_PARAMETER },
+    { 'n', "clones", HAS_PARAMETER },
   };
   ParsedOption opt;
   if (!Command::parse_option(args, options, &opt)) {
@@ -86,6 +88,9 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
       break;
     case 'o':
       flags.output_dir = opt.value;
+      break;
+    case 'n':
+      flags.clones = opt.int_value;
       break;
     default:
       DEBUG_ASSERT(0 && "Unknown option");
@@ -396,6 +401,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   vector<ReplaySession::shr_ptr> clones;
 
   FrameTime stopped_at = 0;
+  size_t branch_no = 1;
   while (session->trace_reader().time() <= stop_at) {
       // current_trace_frame() is the frame about to be replayed; feed it to
       // the models now so they stay exactly in step with what has run.
@@ -416,40 +422,39 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
 
       if (!hit)
           continue;
-
-      if (next_pattern + 1 == npatterns)
-          break;                         // last pattern: detach the replay itself
-
-      // Intermediate pattern: fork the replay and detach the fork.
       if (!session->can_clone())
           continue;                      // not at a stable point yet; step on
 
-      ReplaySession::shr_ptr clone = session->clone();
-      clones.push_back(clone);
-
-      {
+      // Fork the replay once per requested clone and hand each fork off.
+      // At the last pattern the replay itself is the final branch.
+      bool last = (next_pattern + 1 == npatterns);
+      int nclones = last ? flags.clones - 1 : flags.clones;
+      for (int c = 0; c < nclones; c++) {
+          ReplaySession::shr_ptr clone = session->clone();
+          clones.push_back(clone);
+          size_t branch = branch_no++;
           ScopedFd bin, bout;
           string stdio_note;
-          if (!open_branch_stdio(flags.output_dir, next_pattern + 1, model, bin, bout, stdio_note))
+          if (!open_branch_stdio(flags.output_dir, branch, model, bin, bout, stdio_note))
               return 1;
           char tag[PATH_MAX + 64];
-          snprintf(tag, sizeof tag, " [clone %zu: '%s']%s", next_pattern + 1,
-                  flags.until_outputs[next_pattern].c_str(), stdio_note.c_str());
+          snprintf(tag, sizeof tag, " [branch %zu: '%s' #%d]%s", branch,
+                  flags.until_outputs[next_pattern].c_str(), c + 1, stdio_note.c_str());
           int rc = hand_off(*clone, model, sigs, check, flags, stopped_at, tag);
           model.clear_stdio_targets();
           if (rc)
               return rc;
       }
-
+      if (last)
+          break;
       next_pattern++;
       hit = false;
       seen.clear();
   }
-
   {
       ScopedFd bin, bout;
       string stdio_note;
-      if (!open_branch_stdio(flags.output_dir, npatterns ? npatterns : 1, model, bin, bout, stdio_note))
+      if (!open_branch_stdio(flags.output_dir, branch_no, model, bin, bout, stdio_note))
           return 1;
       int rc = hand_off(*session, model, sigs, check, flags, stopped_at, stdio_note.c_str());
       model.clear_stdio_targets();
