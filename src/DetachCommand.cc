@@ -18,6 +18,7 @@
 #include "ReplaySession.h"
 #include "ReplayTask.h"
 #include "AddressSpace.h"
+#include "ElfReader.h"
 #include "rr/rr.h"
 #include "preload/preload_interface.h"
 #include "core.h"
@@ -48,9 +49,11 @@ struct DetachFlags {
   FrameTime event;
   string cwd;
   bool strict;
-  vector<string> until_outputs;
+  string break_at;
   string output_dir;
   int clones;
+  string checkpoint;            // -C
+  vector<string> resume_to;     // -R
   DetachFlags() : event(0), strict(false), clones(1) {}
 };
 
@@ -62,9 +65,11 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
     { 'c', "cwd", HAS_PARAMETER },
     { 's', "strict", NO_PARAMETER },
     { 'e', "event", HAS_PARAMETER },
-    { 'u', "until-output", HAS_PARAMETER },
+    { 'b', "break-at", HAS_PARAMETER },
     { 'o', "output-dir", HAS_PARAMETER },
     { 'n', "clones", HAS_PARAMETER },
+    { 'k', "checkpoint", HAS_PARAMETER },
+    { 'r', "resume-to", HAS_PARAMETER }
   };
   ParsedOption opt;
   if (!Command::parse_option(args, options, &opt)) {
@@ -83,14 +88,20 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
       }
       flags.event = opt.int_value;
       break;
-    case 'u':
-      flags.until_outputs.push_back(opt.value);
+    case 'b':
+      flags.break_at = opt.value;
       break;
     case 'o':
       flags.output_dir = opt.value;
       break;
     case 'n':
       flags.clones = opt.int_value;
+      break;
+    case 'k':
+      flags.checkpoint = opt.value;
+      break;
+    case 'r':
+      flags.resume_to.push_back(opt.value);
       break;
     default:
       DEBUG_ASSERT(0 && "Unknown option");
@@ -163,6 +174,91 @@ static bool open_branch_stdio(const string& dir, size_t k, FdModel& model,
   model.set_stdio_target(2, &out);
   stdio_note = string(" stdio ") + base;
   return true;
+}
+
+static FrameTime run_until(ReplaySession& s, FdModel& model, SignalModel& sigs,
+                           DetachCheck& check, const string& target) {
+  bool by_event = !target.empty() &&
+                  target.find_first_not_of("0123456789") == string::npos;
+  FrameTime event = by_event ? strtoll(target.c_str(), nullptr, 10) : 0;
+
+  string seen;
+  bool hit = false;
+  s.on_stdio_output = nullptr;
+  if (!by_event) {
+    s.on_stdio_output = [&](int, const vector<uint8_t>& b) {
+      if (hit)
+        return;
+      seen.append(b.begin(), b.end());
+      if (seen.find(target) != string::npos)
+        hit = true;
+      if (seen.size() > 65536)
+        seen.erase(0, seen.size() - 32768);
+    };
+  }
+  s.on_task_cloned = [&](Task* parent, Task* child, int flags) {
+    model.fork_task(parent, child, flags);
+  };
+
+  FrameTime stopped_at = -1;
+  while (true) {
+    if (Task* cur = s.current_task()) {
+      model.observe(s.current_trace_frame(), cur);
+      sigs.observe(s.current_trace_frame(), cur);
+      check.observe(s.current_trace_frame(), cur);
+    }
+    auto result = s.replay_step(RUN_CONTINUE);
+    if (result.status == REPLAY_EXITED) {
+      stopped_at = -1;
+      break;
+    }
+    stopped_at = s.trace_reader().time() - 1;
+    if (by_event)
+      hit = s.trace_reader().time() > event;
+    if (hit && s.can_clone())
+      break;
+  }
+  // The callbacks capture locals of this frame.
+  s.on_stdio_output = nullptr;
+  s.on_task_cloned = nullptr;
+  return stopped_at;
+}
+
+static remote_code_ptr resolve_break(Task* t, const string& spec, string& where) {
+  if (spec.compare(0, 2, "0x") == 0) {
+    where = spec;
+    return remote_code_ptr(strtoull(spec.c_str(), nullptr, 16));
+  }
+  for (const auto& m : t->vm()->maps()) {
+    const KernelMapping& km = m.map;
+    if (!(km.prot() & PROT_EXEC) || km.fsname().empty() || km.fsname()[0] != '/')
+      continue;
+    ScopedFd fd(km.fsname().c_str(), O_RDONLY);
+    if (!fd.is_open())
+      continue;
+    ElfFileReader reader(fd);
+    SymbolTable syms = reader.read_symbols(".symtab", ".strtab");
+    for (size_t i = 0; i < syms.size(); i++) {
+      if (!syms.is_name(i, spec.c_str()) || !syms.addr(i))
+        continue;
+      // load base: the mapping of this file at file offset 0
+      uintptr_t base = 0;
+      for (const auto& m2 : t->vm()->maps()) {
+        if (m2.map.fsname() == km.fsname() && m2.map.file_offset_bytes() == 0) {
+          base = m2.map.start().as_int();
+          break;
+        }
+      }
+      uintptr_t addr = syms.addr(i);
+      if (addr < base)                 // PIE: symbol value is an offset
+        addr += base;
+      char buf[32];
+      snprintf(buf, sizeof buf, " @ %#lx", (unsigned long)addr);
+      where = spec + buf + " in " + km.fsname();
+      return remote_code_ptr(addr);
+    }
+  }
+  return remote_code_ptr();
 }
 
 static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
@@ -332,6 +428,209 @@ static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
   return 0;
 }
 
+static int detach_from_checkpoint(ReplaySession::shr_ptr session, FdModel& model,
+                                  SignalModel& sigs, DetachCheck& check,
+                                  const DetachFlags& flags) {
+  FrameTime at = run_until(*session, model, sigs, check, flags.checkpoint);
+  if (at < 0) {
+    fprintf(stderr, "rr detach: trace ended before the checkpoint\n");
+    return 1;
+  }
+
+  // The checkpoint: a session clone plus the models as they were here.
+  ReplaySession::shr_ptr ckpt = session->clone();
+  FdModel ckpt_model = model.snapshot();
+  SignalModel ckpt_sigs = sigs;
+  DetachCheck ckpt_check = check;
+  printf("checkpoint at event %lld\n", (long long)at);
+  fflush(stdout);
+
+  vector<ReplaySession::shr_ptr> branches;
+  // Models of handed-off branches must outlive hand_off; keep them here.
+  vector<unique_ptr<FdModel>> branch_models;
+
+  size_t branch_no = 1;
+  for (const string& target : flags.resume_to) {
+    ReplaySession::shr_ptr b = ckpt->clone();
+    branches.push_back(b);
+    branch_models.push_back(unique_ptr<FdModel>(new FdModel(ckpt_model.snapshot())));
+    FdModel& bm = *branch_models.back();
+    SignalModel bs = ckpt_sigs;
+    DetachCheck bc = ckpt_check;
+
+    FrameTime stopped_at = run_until(*b, bm, bs, bc, target);
+    if (stopped_at < 0) {
+      fprintf(stderr, "rr detach: trace ended before '%s'\n", target.c_str());
+      return 1;
+    }
+
+    ScopedFd bin, bout;
+    string stdio_note;
+    if (!open_branch_stdio(flags.output_dir, branch_no, bm, bin, bout, stdio_note))
+      return 1;
+    char tag[PATH_MAX + 64];
+    snprintf(tag, sizeof tag, " [branch %zu: resumed %lld -> '%s']%s", branch_no,
+             (long long)at, target.c_str(), stdio_note.c_str());
+    int rc = hand_off(*b, bm, bs, bc, flags, stopped_at, tag);
+    bm.clear_stdio_targets();
+    if (rc)
+      return rc;
+    branch_no++;
+  }
+
+  // ckpt and session stay alive (and stopped) until we are killed.
+  while (true) {
+    pause();
+  }
+  return 0;
+}
+
+// A branch that is handed off right away does not replay on, so ticks
+// slop in the current frame (which can_clone() refuses) does not matter;
+// only frames where tasks are going away are off limits.
+static bool can_branch_now(ReplaySession& s) {
+  if (!s.current_task() || !s.done_initial_exec())
+    return false;
+  switch (s.current_trace_frame().event().type()) {
+    case EV_EXIT:
+    case EV_SYSCALLBUF_RESET:
+    case EV_TRACE_TERMINATION:
+      return false;
+    default:
+      return true;
+  }
+}
+
+static int detach_at_function(ReplaySession::shr_ptr session, FdModel& model,
+                              SignalModel& sigs, DetachCheck& check,
+                              const DetachFlags& flags) {
+  string spec = flags.break_at;
+  long first_hit = 1;
+  size_t colon = spec.rfind(':');
+  if (colon != string::npos && colon > 2) {        // "0x..:N" / "sym:N", not "::"
+    first_hit = strtol(spec.c_str() + colon + 1, nullptr, 10);
+    spec.erase(colon);
+    if (first_hit < 1) first_hit = 1;
+  }
+
+  // The replay starts in rr's exec stub; the symbol becomes visible once
+  // the recorded program has exec'd, i.e. the task's address space changed.
+  remote_code_ptr addr;
+  string where;
+  AddressSpace* tried_vm = nullptr;
+  auto try_resolve = [&]() {
+      Task* t = session->current_task();
+      if (!t || t->vm().get() == tried_vm)
+          return false;
+      tried_vm = t->vm().get();
+      addr = resolve_break(t, spec, where);
+      return !addr.is_null();
+  };
+  session->on_task_cloned = [&](Task* parent, Task* child, int f) {
+    model.fork_task(parent, child, f);
+  };
+  while (!try_resolve()) {
+    if (Task* cur = session->current_task()) {
+      model.observe(session->current_trace_frame(), cur);
+      sigs.observe(session->current_trace_frame(), cur);
+      check.observe(session->current_trace_frame(), cur);
+    }
+    auto r = session->replay_step(RUN_CONTINUE);
+    if (r.status == REPLAY_EXITED) {
+        fprintf(stderr, "rr detach: can't resolve '%s' in any executable the trace ran\n", spec.c_str());
+        return 1;
+    }
+  }
+  fprintf(stderr, "rr detach: break at %s\n", where.c_str());
+
+  vector<ReplaySession::shr_ptr> clones;
+  long hits = 0;
+  size_t branch_no = 1;
+  int branches_left = flags.clones;            // the replay itself is the last one
+  FrameTime stopped_at = 0;
+
+  bool warned = false;
+  while (true) {
+      Task* cur = session->current_task();
+      if (cur) {
+          model.observe(session->current_trace_frame(), cur);
+          sigs.observe(session->current_trace_frame(), cur);
+          check.observe(session->current_trace_frame(), cur);
+      }
+      // Arm for this step only: rr remaps segments as it replays (exec,
+      // mmap), which would wipe a permanently installed int3, and a clone
+      // taken while it is armed would carry the int3 into the branch.
+      AddressSpace::shr_ptr vm = cur ? cur->vm() : nullptr;
+      bool armed = vm && vm->add_breakpoint(addr, BKPT_USER);
+      if (!armed && !warned) {
+          //fprintf(stderr, "rr detach: warning: can't arm breakpoint at %s yet\n", where.c_str());
+          fprintf(stderr, "rr detach: warning: can't arm breakpoint at %s yet (cur tid %d, vm %p, first_running_task %p)\n",
+                  where.c_str(), cur ? cur->tid : -1, (void*)vm.get(),
+                  vm ? (void*)vm->first_running_task() : nullptr);
+          warned = true;
+      }
+      auto result = session->replay_step(RUN_CONTINUE);
+      if (armed)
+          vm->remove_breakpoint(addr, BKPT_USER);
+      if (result.status == REPLAY_EXITED) {
+          fprintf(stderr, "rr detach: trace ended after %ld hit(s) of %s\n", hits, spec.c_str());
+          return 1;
+      }
+      stopped_at = session->trace_reader().time() - 1;
+      if (!result.break_status.breakpoint_hit)
+          continue;
+
+      Task* hit_task = result.break_status.task_context.task;
+      hits++;
+      bool take = hits >= first_hit && can_branch_now(*session);
+      can_branch_now(*session);
+      if (take && branches_left > 1) {
+          ReplaySession::shr_ptr clone = session->clone();   // no int3 in memory now
+          clones.push_back(clone);
+          size_t branch = branch_no++;
+          ScopedFd bin, bout;
+          string stdio_note;
+          if (!open_branch_stdio(flags.output_dir, branch, model, bin, bout, stdio_note))
+              return 1;
+          char tag[PATH_MAX + 64];
+          snprintf(tag, sizeof tag, " [branch %zu: %s hit #%ld, tid %d]%s", branch, spec.c_str(),
+                  hits, hit_task ? hit_task->rec_tid : 0, stdio_note.c_str());
+          int rc = hand_off(*clone, model, sigs, check, flags, stopped_at, tag);
+          model.clear_stdio_targets();
+          if (rc)
+              return rc;
+          branches_left--;
+      } else if (take) {
+          break;                                   // last branch: the replay itself
+      }
+
+      // Step off the breakpoint address (it is disarmed right now).
+      auto step = session->replay_step(RUN_SINGLESTEP);
+      if (step.status == REPLAY_EXITED) {
+          fprintf(stderr, "rr detach: trace ended while stepping over %s\n", spec.c_str());
+          return 1;
+      }
+  }
+  // (breakpoint is already disarmed here)
+
+  {
+    ScopedFd bin, bout;
+    string stdio_note;
+    if (!open_branch_stdio(flags.output_dir, branch_no, model, bin, bout, stdio_note))
+      return 1;
+    char tag[PATH_MAX + 64];
+    snprintf(tag, sizeof tag, " [%s hit #%ld]%s", spec.c_str(), hits, stdio_note.c_str());
+    int rc = hand_off(*session, model, sigs, check, flags, stopped_at, tag);
+    model.clear_stdio_targets();
+    if (rc)
+      return rc;
+  }
+  while (true) {
+    pause();
+  }
+  return 0;
+}
+
 static int detach(const string& trace_dir, const DetachFlags& flags) {
   ReplaySession::Flags session_flags;
   session_flags.preserve_thread_groups = true;
@@ -371,102 +670,34 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   SignalModel sigs;
   DetachCheck check;
 
-  // 1. Replay until event `flags.event` has been fully replayed, or until
-  //    each of the -u strings has appeared. Every match but the last forks
-  //    the replay (ReplaySession::clone) and detaches the fork; the replay
-  //    itself continues and is detached at the last match.
-  FrameTime stop_at = flags.event;
-  string seen;
-  bool hit = false;
-  size_t next_pattern = 0;
-  const size_t npatterns = flags.until_outputs.size();
-
-  if (npatterns) {
-      stop_at = INT64_MAX;
-      session->on_stdio_output = [&](int, const vector<uint8_t>& b) {
-          if (hit)
-              return;
-
-          seen.append(b.begin(), b.end());
-
-          if (seen.find(flags.until_outputs[next_pattern]) != string::npos)
-              hit = true;
-          if (seen.size() > 65536)
-              seen.erase(0, seen.size() - 32768);
-      };
+  if (!flags.checkpoint.empty()) {
+    return detach_from_checkpoint(session, model, sigs, check, flags);
+  }
+  if (!flags.break_at.empty()) {
+    return detach_at_function(session, model, sigs, check, flags);
   }
 
-  // Clone sessions must outlive the detached processes: destroying a
-  // ReplaySession tries to kill its tasks.
-  vector<ReplaySession::shr_ptr> clones;
-
-  FrameTime stopped_at = 0;
-  size_t branch_no = 1;
-  while (session->trace_reader().time() <= stop_at) {
-      // current_trace_frame() is the frame about to be replayed; feed it to
-      // the models now so they stay exactly in step with what has run.
-      if (Task* cur = session->current_task()) {
-          model.observe(session->current_trace_frame(), cur);
-          sigs.observe(session->current_trace_frame(), cur);
-          check.observe(session->current_trace_frame(), cur);
-      }
-      auto result = session->replay_step(RUN_CONTINUE);
-      if (result.status == REPLAY_EXITED) {
-          fprintf(stderr, "rr detach: trace ended before %s\n",
-                  npatterns ? "the output appeared" : "the target event");
-          return 1;
-      }
-      // The reader has moved on to the next frame; the one just replayed is
-      // the frame before it.
-      stopped_at = session->trace_reader().time() - 1;
-
-      if (!hit)
-          continue;
-      if (!session->can_clone())
-          continue;                      // not at a stable point yet; step on
-
-      // Fork the replay once per requested clone and hand each fork off.
-      // At the last pattern the replay itself is the final branch.
-      bool last = (next_pattern + 1 == npatterns);
-      int nclones = last ? flags.clones - 1 : flags.clones;
-      for (int c = 0; c < nclones; c++) {
-          ReplaySession::shr_ptr clone = session->clone();
-          clones.push_back(clone);
-          size_t branch = branch_no++;
-          ScopedFd bin, bout;
-          string stdio_note;
-          if (!open_branch_stdio(flags.output_dir, branch, model, bin, bout, stdio_note))
-              return 1;
-          char tag[PATH_MAX + 64];
-          snprintf(tag, sizeof tag, " [branch %zu: '%s' #%d]%s", branch,
-                  flags.until_outputs[next_pattern].c_str(), c + 1, stdio_note.c_str());
-          int rc = hand_off(*clone, model, sigs, check, flags, stopped_at, tag);
-          model.clear_stdio_targets();
-          if (rc)
-              return rc;
-      }
-      if (last)
-          break;
-      next_pattern++;
-      hit = false;
-      seen.clear();
+  // -e EVENT: replay to the event and hand the replay itself off.
+  FrameTime stopped_at = run_until(*session, model, sigs, check, std::to_string(flags.event));
+  if (stopped_at < 0) {
+    fprintf(stderr, "rr detach: trace ended before event %lld\n", (long long)flags.event);
+    return 1;
   }
   {
-      ScopedFd bin, bout;
-      string stdio_note;
-      if (!open_branch_stdio(flags.output_dir, branch_no, model, bin, bout, stdio_note))
-          return 1;
-      int rc = hand_off(*session, model, sigs, check, flags, stopped_at, stdio_note.c_str());
-      model.clear_stdio_targets();
-      if (rc)
-          return rc;
+    ScopedFd bin, bout;
+    string stdio_note;
+    if (!open_branch_stdio(flags.output_dir, 1, model, bin, bout, stdio_note))
+      return 1;
+    int rc = hand_off(*session, model, sigs, check, flags, stopped_at, stdio_note.c_str());
+    model.clear_stdio_targets();
+    if (rc)
+      return rc;
   }
 
-  // 5. Keep rr alive until the tracees are handed off.
+  // Keep rr alive until the tracees are handed off.
   while (true) {
     pause();
   }
-
   return 0;
 }
 
@@ -474,8 +705,8 @@ int DetachCommand::run(vector<string>& args) {
   DetachFlags flags;
   while (parse_detach_arg(args, flags)) {
   }
-  if (!flags.event && flags.until_outputs.empty()) {
-    print_help(stderr);
+  if (!flags.event && flags.checkpoint.empty() && flags.break_at.empty()) {
+      print_help(stderr);
     return 1;
   }
   string trace_dir;

@@ -254,11 +254,9 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
   }
   TraceTaskEvent tte = read_task_trace_event(t, TraceTaskEvent::CLONE);
 
-  bool preserve = t->session().as_replay()->flags().preserve_thread_groups;
-  if (preserve && Arch::clone == sys) {
-    // |flags| here is the masked value for Arch::clone, or CLONE_VM for the
-    // vfork-as-clone case; both go through clone3 so the kernel assigns the
-    // recorded tid.
+  ReplaySession* rs = t->session().as_replay();
+  bool reproduce_tids = rs->flags().preserve_thread_groups && !rs->is_clone();
+  if (reproduce_tids && Arch::clone == sys) {
     r = clone_to_clone3<Arch>(t, r, r.arg1(), tte.tid());
   } else {
     r.set_syscallno(sys);
@@ -308,8 +306,8 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
       << "Expected tid " << t->rec_tid << ", got " << tte.parent_tid();
   long rec_tid = tte.tid();
 
-  if (t->session().as_replay()->flags().preserve_thread_groups && new_tid != rec_tid) {
-    FATAL() << "tid reservation failed: wanted " << rec_tid << " but got " << new_tid;
+  if (reproduce_tids && new_tid != rec_tid) {
+      FATAL() << "tid reservation failed: wanted " << rec_tid << " but got " << new_tid;
   }
 
   CloneParameters params;

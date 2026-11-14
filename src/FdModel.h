@@ -77,6 +77,8 @@ public:
 
   explicit FdModel(const std::string& initial_cwd) : cwd(initial_cwd) {}
 
+  FdModel snapshot() const;
+
   /** Call after each replay step with the frame that was just replayed. */
   void observe(const TraceFrame& frame, Task* t);
 

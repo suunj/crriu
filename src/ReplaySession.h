@@ -312,6 +312,8 @@ public:
    */
   static bool is_ignored_signal(int sig);
 
+  bool is_clone() const { return is_clone_; }
+
   const Flags& flags() const { return flags_; }
 
   typedef std::set<MemoryRange, MappingComparator> MemoryRanges;
@@ -451,6 +453,8 @@ private:
 
   std::shared_ptr<MemoryRanges> always_free_address_space_fast;
   std::shared_ptr<MemoryRanges> always_free_address_space_accurate;
+
+  bool is_clone_ = false;
 };
 
 void emergency_check_intel_pt(ReplayTask* t, std::ostream& stream);

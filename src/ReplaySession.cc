@@ -341,6 +341,7 @@ ReplaySession::shr_ptr ReplaySession::clone() {
   clear_syscall_bp();
 
   shr_ptr session(new ReplaySession(*this));
+  session->is_clone_ = true;
   LOG(debug) << "  deepfork session is " << session.get();
 
   copy_state_to(*session, emufs(), session->emufs());

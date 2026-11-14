@@ -699,4 +699,54 @@ const void* FdModel::table_id(Task* t) const {
   return task_tables.at(t->rec_tid).get();
 }
 
+FdModel FdModel::snapshot() const {
+  FdModel s(cwd);
+  s.last_time = last_time;
+
+  std::map<const OpenFile*, OpenFilePtr> files;
+  auto copy_file = [&](const OpenFilePtr& f) -> OpenFilePtr {
+    if (!f) {
+      return nullptr;
+    }
+    auto it = files.find(f.get());
+    if (it != files.end()) {
+      return it->second;
+    }
+    auto n = std::make_shared<OpenFile>(*f);
+    files.emplace(f.get(), n);
+    return n;
+  };
+
+  std::map<const ModelFdTable*, ModelFdTablePtr> tables;
+  for (const auto& kv : task_tables) {
+    auto it = tables.find(kv.second.get());
+    if (it == tables.end()) {
+      auto nt = std::make_shared<ModelFdTable>();
+      for (const auto& e : kv.second->fds) {
+        nt->fds[e.first] = copy_file(e.second);
+      }
+      it = tables.emplace(kv.second.get(), nt).first;
+    }
+    s.task_tables[kv.first] = it->second;
+  }
+
+  // Epoll member keys point at OpenFiles; repoint them at the copies.
+  // (copy_file may add entries to `files` while we iterate: collect first.)
+  std::vector<OpenFilePtr> copies;
+  for (const auto& kv : files) {
+    copies.push_back(kv.second);
+  }
+  for (const auto& n : copies) {
+    if (n->epoll_members.empty()) {
+      continue;
+    }
+    std::map<EpollKey, EpollMember, EpollKeyLess> m;
+    for (const auto& e : n->epoll_members) {
+      m[EpollKey{ e.first.fd, copy_file(e.first.file) }] = e.second;
+    }
+    n->epoll_members.swap(m);
+  }
+  return s;
+}
+
 } // namespace rr
