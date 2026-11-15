@@ -11,16 +11,22 @@
 TRACE=$1; LOG=$2; shift 2
 . "$(dirname "$0")/common.sh"
 
-# Turn each SEL into "-u SEL" or "-e SEL", keeping spaces inside SEL intact.
-n=$#; i=0
-while [ $i -lt $n ]; do
-  s=$1; shift
-  case "$s" in
-    ''|*[!0-9]*) set -- "$@" -u "$s" ;;
-    *)           set -- "$@" -e "$s" ;;
-  esac
-  i=$((i + 1))
-done
+# Currently support one numeric event selector.
+if [ "$#" -ne 1 ]; then
+    echo "usage: crriu-detach.sh TRACE LOG EVENT" >&2
+    exit 2
+fi
+
+s=$1
+
+case "$s" in
+    ''|*[!0-9]*)
+        echo "error: expected a numeric event, got: $s" >&2
+        exit 2
+        ;;
+esac
+
+set -- -e "$s"
 
 exec unshare -pf --mount-proc sh -c '
   RR=$1; BR=$2; CWD=$3; TRACE=$4; LOG=$5; shift 5

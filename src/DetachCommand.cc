@@ -582,23 +582,44 @@ static int detach_at_function(ReplaySession::shr_ptr session, FdModel& model,
 
       Task* hit_task = result.break_status.task_context.task;
       hits++;
+
       bool take = hits >= first_hit && can_branch_now(*session);
-      can_branch_now(*session);
+
       if (take && branches_left > 1) {
-          ReplaySession::shr_ptr clone = session->clone();   // no int3 in memory now
+          ReplaySession::shr_ptr clone = session->clone();
           clones.push_back(clone);
+
+          // Independent state for this branch.
+          FdModel branch_model = model.snapshot();
+          SignalModel branch_sigs = sigs;
+          DetachCheck branch_check = check;
+
           size_t branch = branch_no++;
           ScopedFd bin, bout;
           string stdio_note;
-          if (!open_branch_stdio(flags.output_dir, branch, model, bin, bout, stdio_note))
+
+          if (!open_branch_stdio(flags.output_dir, branch,
+                      branch_model, bin, bout, stdio_note))
               return 1;
+
           char tag[PATH_MAX + 64];
-          snprintf(tag, sizeof tag, " [branch %zu: %s hit #%ld, tid %d]%s", branch, spec.c_str(),
-                  hits, hit_task ? hit_task->rec_tid : 0, stdio_note.c_str());
-          int rc = hand_off(*clone, model, sigs, check, flags, stopped_at, tag);
-          model.clear_stdio_targets();
+          snprintf(tag, sizeof tag,
+                  " [branch %zu: %s hit #%ld, tid %d]%s",
+                  branch, spec.c_str(), hits,
+                  hit_task ? hit_task->rec_tid : 0,
+                  stdio_note.c_str());
+
+          int rc = hand_off(*clone,
+                  branch_model,
+                  branch_sigs,
+                  branch_check,
+                  flags, stopped_at, tag);
+
+          branch_model.clear_stdio_targets();
+
           if (rc)
               return rc;
+
           branches_left--;
       } else if (take) {
           break;                                   // last branch: the replay itself
