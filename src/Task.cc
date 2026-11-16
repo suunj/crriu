@@ -201,6 +201,11 @@ void Task::proceed_to_exit(bool wait) {
   }
 }
 
+bool Task::thread_group_shared() {
+  ReplaySession* rs = session().as_replay();
+  return rs && rs->flags().preserve_thread_groups;
+}
+
 WaitStatus Task::kill() {
   if (was_reaped()) {
     return this->status();
@@ -221,11 +226,21 @@ WaitStatus Task::kill() {
   */
   LOG(debug) << "Sending SIGKILL to " << tid;
   int ret = syscall(SYS_tgkill, real_tgid(), tid, SIGKILL);
-  ASSERT(this, ret == 0);
+  /* With preserve_thread_groups the tracees are real threads: the SIGKILL
+   * sent to a sibling already took this whole thread group down, and the
+   * kernel may have reaped this task before we get here. */
+  bool group_killed = ret == -1 && errno == ESRCH && thread_group_shared();
+  ASSERT(this, ret == 0 || group_killed);
   WaitResult result;
   bool is_exit_event;
   do {
     result = WaitManager::wait_stop_or_exit(WaitOptions(tid));
+    if (group_killed && result.code == WAIT_NO_CHILD) {
+      LOG(debug) << " -> already reaped by sibling SIGKILL";
+      did_kill();
+      was_reaped_ = true;
+      return WaitStatus::for_fatal_sig(SIGKILL);
+    }
     ASSERT(this, result.code == WAIT_OK);
     LOG(debug) << " -> " << result.status;
     is_exit_event = result.status.ptrace_event() == PTRACE_EVENT_EXIT;

@@ -1077,6 +1077,9 @@ public:
     return address_of_last_execution_resume;
   }
 
+  /** True when this task shares a real thread group with its siblings
+   *  (replay with preserve_thread_groups), so one SIGKILL kills them all. */
+  bool thread_group_shared();
   bool was_reaped() const {
     return was_reaped_;
   }

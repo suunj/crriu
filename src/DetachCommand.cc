@@ -517,9 +517,21 @@ static FrameTime run_until(ReplaySession& s, FdModel& model, SignalModel& sigs,
     if (armed)
       watch.disarm(*vm);
     if (trace_frames && s.trace_reader().time() > before) {   // frame completed
-      fprintf(stderr, "frame %lld tid %d %-36s ticks %lld rip %s\n",
+      string ret;
+      if (pending.event().is_syscall_event() &&
+          pending.event().Syscall().state == EXITING_SYSCALL) {
+        long r = (long)pending.regs().syscall_result_signed();
+        char buf[48];
+        if (r < 0 && r > -4096)
+          snprintf(buf, sizeof buf, " = -%s", errno_name(-r).c_str());
+        else
+          snprintf(buf, sizeof buf, " = %ld", r);
+        ret = buf;
+      }
+      fprintf(stderr, "frame %lld tid %d %-36s ticks %lld rip %s%s\n",
               (long long)(s.trace_reader().time() - 1), pending.tid(),
-              pending.event().str().c_str(), (long long)pending.ticks(), pending_sym.c_str());
+              pending.event().str().c_str(), (long long)pending.ticks(),
+              pending_sym.c_str(), ret.c_str());
     }
     if (result.status == REPLAY_EXITED) {
       stopped_at = -1;
