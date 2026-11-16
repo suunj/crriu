@@ -321,6 +321,16 @@ bool FdModel::materialize(Task* t) {
   for (const auto& kv : task_tables.at(t->rec_tid)->fds) {
     if (kv.second->type != OpenFile::UNSUPPORTED) table[kv.first] = kv.second;
   }
+  // The branch's own stdio first: this applies even when the model has
+  // nothing else to restore (a program that opened no files).
+  {
+    AutoRemoteSyscalls remote(t);
+    for (int fd = 0; fd < 3; fd++) {
+      if (stdio_target[fd])
+        remote.infallible_send_fd_dup(*stdio_target[fd], fd, 0);
+    }
+  }
+
   if (table.empty())
     return true;
 
@@ -343,12 +353,6 @@ bool FdModel::materialize(Task* t) {
   const int dup2_nr = syscall_number_for_dup2(arch);
   const int openat_nr = syscall_number_for_openat(arch);
 
-  for (int fd = 0; fd < 3; fd++) {
-      if (stdio_target[fd]) {
-          remote.infallible_send_fd_dup(*stdio_target[fd], fd, 0);
-      }
-  }
-
   // Reserve a temporary FD range above every target FD.
   int max_fd = table.rbegin()->first;
   if (max_fd == std::numeric_limits<int>::max())
@@ -369,6 +373,8 @@ bool FdModel::materialize(Task* t) {
 
   // Phase 1: Open each distinct file description.
   for (const auto& kv : table) {
+    if (kv.first < 3 && stdio_target[kv.first])
+      continue;                 // -o: the branch's own stdio wins over the recorded one
     OpenFile* f = kv.second.get();
 
     if (temporary.count(f))
@@ -505,6 +511,8 @@ bool FdModel::materialize(Task* t) {
 
   // Phase 2: Install the target FD numbers.
   for (const auto& kv : table) {
+    if (kv.first < 3 && stdio_target[kv.first])
+      continue;                 // -o: the branch's own stdio wins over the recorded one
     int target = kv.first;
     int source = temporary.at(kv.second.get());
 
@@ -522,6 +530,10 @@ bool FdModel::materialize(Task* t) {
   std::set<OpenFile*> restored_epolls;
 
   for (const auto& kv : table) {
+
+    if (kv.first < 3 && stdio_target[kv.first])
+
+      continue;                 // -o: the branch's own stdio wins over the recorded one
     OpenFile* ep = kv.second.get();
 
     if (ep->type != OpenFile::EPOLL)
