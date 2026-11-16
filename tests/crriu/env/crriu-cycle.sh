@@ -15,6 +15,8 @@ N=$#
 # Leftovers from an earlier cycle would hold pids and FIFOs.
 pkill -f 'bin/rr detach' 2>/dev/null || true
 pkill -KILL -x 'rr:.*' 2>/dev/null || true
+pkill -f 'unshare -pf --mount-proc' 2>/dev/null || true
+pkill -f 'unshare -pf --mount-proc' 2>/dev/null || true
 pkill -f 'criu restore' 2>/dev/null || true
 sleep 1
 rm -f "$LOG"; rm -rf "$IMG"; mkdir -p "$IMG"
@@ -43,6 +45,7 @@ done
 
 # Everything is on disk now; free the pids.
 kill "$RRHOST" 2>/dev/null || true
+pkill -P "$RRHOST" 2>/dev/null || true   # pid-ns init (sleep infinity)
 sleep 1
 pkill -KILL -x 'rr:.*' 2>/dev/null || true
 
