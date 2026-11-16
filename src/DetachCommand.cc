@@ -199,6 +199,34 @@ static void wait_for_stop() {
   fprintf(stderr, "rr detach: exiting; branches stay, checkpoints are killed\n");
 }
 
+// Where a branch is taken: right after frame `event`, or at the `hit`-th
+// entry of function `symbol`.
+struct Target {
+  string text;
+  FrameTime event = 0;
+  string symbol;
+  long hit = 1;
+  bool by_event() const { return event > 0; }
+};
+
+static Target parse_target(const string& spec) {
+  Target t;
+  t.text = spec;
+  if (!spec.empty() && spec.find_first_not_of("0123456789") == string::npos) {
+    t.event = strtoll(spec.c_str(), nullptr, 10);
+    return t;
+  }
+  size_t colon = spec.rfind(':');
+  if (colon != string::npos && colon > 2) {        // "sym:N" / "0x..:N", not "::"
+    t.hit = strtol(spec.c_str() + colon + 1, nullptr, 10);
+    if (t.hit < 1) t.hit = 1;
+    t.symbol = spec.substr(0, colon);
+  } else {
+    t.symbol = spec;
+  }
+  return t;
+}
+
 // A live checkpoint: a stopped clone of the replay plus the models as they
 // were there. `time` is the last frame the clone has fully replayed
 // (trace_reader().time() - 1 at clone time); a branch taken from it is
@@ -220,6 +248,12 @@ public:
   // Clone `s` here. Caller guarantees s.can_clone(). Duplicates are ignored.
   // The earliest entry is the base and is never evicted; beyond it `max`
   // entries are kept, least recently used evicted first.
+  // Targets not yet branched. A pending target that is already behind the
+  // replay can only be served from its nearest checkpoint, so evict() keeps
+  // that one.
+  void set_pending(const vector<Target>& targets) { pending_ = targets; }
+  void pop_pending() { if (!pending_.empty()) pending_.erase(pending_.begin()); }
+
   bool take(ReplaySession& s, const FdModel& fd, const SignalModel& sigs,
             const DetachCheck& check, const std::map<string, long>& hits,
             FrameTime time) {
@@ -230,14 +264,18 @@ public:
     by_time_.emplace(time, std::move(c));
     fprintf(stderr, "rr detach: checkpoint at event %lld (%zu cached)\n",
             (long long)time, by_time_.size());
-    evict();
+    evict(time, hits);
     return true;
   }
 
   // Latest checkpoint from which `t` is still ahead: by frame, the last one
   // at or before t.event; by function, the last one that has seen fewer
   // than t.hit entries of t.symbol. nullptr if even the base is too late.
-  Checkpoint* nearest_before(const struct Target& t);
+  Checkpoint* nearest_before(const Target& t) {
+    Checkpoint* c = find_before(t);
+    if (c) c->last_used = ++tick_;
+    return c;
+  }
 
   size_t size() const { return by_time_.size(); }
 
@@ -250,14 +288,46 @@ public:
   }
 
 private:
-  void evict() {
+  Checkpoint* find_before(const Target& t) {
+    Checkpoint* best = nullptr;
+    for (auto& kv : by_time_) {
+      Checkpoint& c = kv.second;
+      bool ok;
+      if (t.by_event()) {
+        ok = c.time <= t.event;
+      } else {
+        auto h = c.hits.find(t.symbol);
+        ok = (h == c.hits.end() ? 0 : h->second) < t.hit;
+      }
+      if (ok) best = &c;
+    }
+    return best;
+  }
+
+  // Checkpoints a pending, already-passed target will start from.
+  std::set<FrameTime> pinned(FrameTime pos, const std::map<string, long>& hits) {
+    std::set<FrameTime> keep;
+    for (const Target& t : pending_) {
+      auto h = hits.find(t.symbol);
+      bool behind = t.by_event() ? t.event <= pos
+                                 : (h == hits.end() ? 0 : h->second) >= t.hit;
+      if (!behind) continue;
+      if (Checkpoint* c = find_before(t)) keep.insert(c->time);
+    }
+    return keep;
+  }
+
+  void evict(FrameTime pos, const std::map<string, long>& hits) {
+    std::set<FrameTime> keep = pinned(pos, hits);
     while (by_time_.size() > max_ + 1) {
       auto victim = by_time_.end();
       for (auto it = std::next(by_time_.begin()); it != by_time_.end(); ++it) {
+        if (keep.count(it->first)) continue;
         if (victim == by_time_.end() || it->second.last_used < victim->second.last_used) {
           victim = it;
         }
       }
+      if (victim == by_time_.end()) break;     // everything left is pinned
       fprintf(stderr, "rr detach: evicting checkpoint at event %lld\n",
               (long long)victim->first);
       by_time_.erase(victim);             // ~ReplaySession: tasks killed, emufs freed
@@ -265,6 +335,7 @@ private:
   }
 
   std::map<FrameTime, Checkpoint> by_time_;
+  vector<Target> pending_;
   size_t max_;
   uint64_t tick_ = 0;
 };
@@ -390,33 +461,6 @@ static remote_code_ptr resolve_break(Task* t, const string& spec, string& locati
   return remote_code_ptr();
 }
 
-// Where a branch is taken: right after frame `event`, or at the `hit`-th
-// entry of function `symbol`.
-struct Target {
-  string text;
-  FrameTime event = 0;
-  string symbol;
-  long hit = 1;
-  bool by_event() const { return event > 0; }
-};
-
-static Target parse_target(const string& spec) {
-  Target t;
-  t.text = spec;
-  if (!spec.empty() && spec.find_first_not_of("0123456789") == string::npos) {
-    t.event = strtoll(spec.c_str(), nullptr, 10);
-    return t;
-  }
-  size_t colon = spec.rfind(':');
-  if (colon != string::npos && colon > 2) {        // "sym:N" / "0x..:N", not "::"
-    t.hit = strtol(spec.c_str() + colon + 1, nullptr, 10);
-    if (t.hit < 1) t.hit = 1;
-    t.symbol = spec.substr(0, colon);
-  } else {
-    t.symbol = spec;
-  }
-  return t;
-}
 
 // Function entries watched while replaying. Every function named on the
 // command line is armed for the whole replay so that `hits` is exact at
@@ -460,22 +504,6 @@ struct Watch {
   }
 };
 
-Checkpoint* CheckpointStore::nearest_before(const Target& t) {
-  Checkpoint* best = nullptr;
-  for (auto& kv : by_time_) {
-    Checkpoint& c = kv.second;
-    bool ok;
-    if (t.by_event()) {
-      ok = c.time <= t.event;
-    } else {
-      auto h = c.hits.find(t.symbol);
-      ok = (h == c.hits.end() ? 0 : h->second) < t.hit;
-    }
-    if (ok) best = &c;
-  }
-  if (best) best->last_used = ++tick_;
-  return best;
-}
 
 // Replay `s` until `target`. Returns the last completed frame (-1 if the
 // trace ended first). With `store`, clones a checkpoint every `every` frames.
@@ -797,6 +825,7 @@ static int detach_cached(ReplaySession::shr_ptr session, FdModel& model,
     targets.push_back(parse_target(spec));
     if (!targets.back().by_event()) watch.symbols.push_back(targets.back().symbol);
   }
+  store.set_pending(targets);
   std::sort(watch.symbols.begin(), watch.symbols.end());
   watch.symbols.erase(std::unique(watch.symbols.begin(), watch.symbols.end()),
                       watch.symbols.end());
@@ -866,6 +895,7 @@ static int detach_cached(ReplaySession::shr_ptr session, FdModel& model,
       if (rc)
         return rc;
     }
+    store.pop_pending();
   }
 
   fprintf(stderr, "rr detach: %zu branch(es); %zu checkpoint(s) kept:\n", branch_no - 1, store.size());
