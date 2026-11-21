@@ -11,11 +11,13 @@ K=$1
 IMG=$CRRIU_IMG/$K; BR=$CRRIU_BR
 [ -d "$IMG" ] || { echo "no images for branch $K in $IMG" >&2; exit 1; }
 
-unshare -pf --mount-proc criu restore -D "$IMG" --shell-job --ext-unix-sk -v4 -o restore.log \
+unshare -pf --kill-child --mount-proc criu restore -D "$IMG" --shell-job --ext-unix-sk -v4 -o restore.log \
   >"$IMG/restore.out" 2>&1 </dev/null &
+echo $! > "$IMG/restore.pid"        # kill -KILL this to tear the restored namespace down
 sleep 3
-# Newest stopped tracee is ours.
-RPID=$(ps -eo pid,stat,comm --sort=etimes | awk '$2 ~ /^T/ && $3 ~ /^rr:qemu/ {print $1; exit}')
+# The restored root: unshare (restore.pid) -> criu (PID 1 there) -> it.
+RPID=$(pgrep -P "$(pgrep -P "$(cat "$IMG/restore.pid")")" | head -1)
+[ -n "$RPID" ] || { echo "restore of branch $K produced no process; see $IMG/restore.log" >&2; exit 1; }
 [ -n "$RPID" ] || { echo "restore failed, see $IMG/restore.log" >&2; exit 1; }
 echo "branch $K restored: host pid $RPID"
 kill -CONT "$RPID"; echo "continued; waiting $((3 + ${INJECT_WAIT:-8}))s for output"

@@ -2224,17 +2224,6 @@ void ReplaySession::prepare_to_detach_tasks() {
   }
 }
 
-void ReplaySession::forget_tasks() {
-  while (!task_map.empty()) {
-    Task* t = task_map.begin()->second;
-    t->forget();
-    delete t;
-  }
-  while (!vm_map.empty()) {
-    AddressSpace* a = vm_map.begin()->second;
-    delete a;
-  }
-}
 
 void ReplaySession::detach_tasks(pid_t new_ptracer, ScopedFd& new_tracee_socket_receiver) {
   // First tell Yama to let new_ptracer ptrace the tracees.
@@ -2296,6 +2285,14 @@ bool ReplaySession::mark_stdio() const {
 bool ReplaySession::echo_stdio() const {
   return flags().redirect_stdio && visible_execution_ &&
     current_frame_time() >= suppress_stdio_before_event_;
+}
+
+void ReplaySession::forget_tasks() {
+  while (!task_map.empty()) {
+    Task* t = task_map.rbegin()->second;
+    t->forget();
+    delete t;          // on_destroy(): task_map / thread group / vm / fds 에서 제거
+  }
 }
 
 } // namespace rr

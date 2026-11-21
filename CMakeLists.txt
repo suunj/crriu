@@ -785,6 +785,17 @@ if(intel_pt_decoding)
   target_link_libraries(rr ${LIBIPT})
 endif()
 
+# Optional: instruction decoding for `rr detach -x` (memory access sets).
+pkg_check_modules(CAPSTONE capstone)
+if(CAPSTONE_FOUND)
+  target_include_directories(rr PRIVATE ${CAPSTONE_INCLUDE_DIRS})
+  target_compile_definitions(rr PRIVATE HAVE_CAPSTONE=1)
+  target_link_libraries(rr ${CAPSTONE_LDFLAGS})
+  message(STATUS "capstone ${CAPSTONE_VERSION}: rr detach -x enabled")
+else()
+  message(STATUS "capstone not found: rr detach -x disabled")
+endif()
+
 if(LIBRT)
   target_link_libraries(rr ${LIBRT})
 endif()

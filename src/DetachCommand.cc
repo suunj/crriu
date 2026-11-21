@@ -24,6 +24,9 @@
 #include "core.h"
 #include "log.h"
 #include "main.h"
+#ifdef HAVE_CAPSTONE
+#include <capstone/capstone.h>
+#endif
 
 using namespace std;
 
@@ -40,21 +43,50 @@ protected:
 
 DetachCommand DetachCommand::singleton(
     "detach",
-    " rr detach [OPTION]... [<trace-dir>]\n"
-    "  Replay to a given event, then detach from all tracees, leaving\n"
-    "  them SIGSTOPped so another tracer (e.g. CRIU) can seize them.\n"
-    "  -e, --event=<EVENT>        event number to stop and detach at\n");
+    " rr detach [OPTION]... -r TARGET... [<trace-dir>]\n"
+    "  Replay to each TARGET and hand off a copy of the replayed processes\n"
+    "  there, SIGSTOPped, as an independent branch: no longer traced, with\n"
+    "  the recorded fds and signal state recreated. TARGET is an event\n"
+    "  number (branch right after that frame) or SYM[:N] (the N-th entry of\n"
+    "  function SYM, default 1). Targets behind the replay are served from\n"
+    "  the checkpoint cache; rr stays alive holding it until SIGTERM/SIGINT.\n"
+    "  -r, --resume-to=TARGET     branch here (repeatable)\n"
+    "  -n, --clones=N             branches per target (default 1)\n"
+    "  -o, --output-dir=DIR       per-branch stdio: DIR/branch-K.stdin (FIFO)\n"
+    "                             and DIR/branch-K.log\n"
+    "  -c, --cwd=DIR              cwd of the recording (default: current)\n"
+    "  -s, --strict               refuse to branch where state can't be restored\n"
+    "  -k, --checkpoint=EVENT     also keep a checkpoint at EVENT\n"
+    "  -y, --cache-every=N        checkpoint every N events while replaying\n"
+    "  -m, --cache-max=N          checkpoints kept besides the base (default 4)\n"
+    "  -e, --exits                also stop where each watched call returns:\n"
+    "                             log the return value, dump NAME.SYM.N.exit.bin\n"
+    "  -f, --from=EVENT           replay natively (no breakpoints, no hit counting)\n"
+    "                             until trace event EVENT, then start watching\n"
+    "  -x, --access=SYM[:EVERY]   single-step every EVERY-th call of SYM to its\n"
+    "                             return, logging each memory read/write to\n"
+    "                             DIR/access.SYM.N.txt (needs capstone)\n"
+    "  -d, --dump-mem=NAME:ADDR:LEN[:EVERY[:FROM]]\n"
+    "                             at every EVERY-th hit of any watched SYM,\n"
+    "                             dump LEN bytes at ADDR to\n"
+    "                             DIR/NAME.SYM.<hit>.bin (DIR from -o)\n"
+    "  CRRIU_TRACE=1 logs every replayed frame (event, ticks, rip symbol,\n"
+    "  syscall result).\n");
 
 struct DetachFlags {
   string cwd;
   bool strict;
   string output_dir;
   int clones;
-  string checkpoint;            // -C
-  vector<string> resume_to;     // -R
+  string checkpoint;            // -k
+  vector<string> resume_to;     // -r
   FrameTime cache_every;
   size_t cache_max;
-  DetachFlags() : strict(false), clones(1), cache_every(0), cache_max(4) {}
+  vector<string> dumps;         // -d
+  bool exits;                   // -e
+  vector<string> access;        // -x
+  long from_event = 0;          // -f
+  DetachFlags() : strict(false), clones(1), cache_every(0), cache_max(4), exits(false) {}
 };
 
 static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
@@ -69,7 +101,11 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
     { 'k', "checkpoint", HAS_PARAMETER },
     { 'r', "resume-to", HAS_PARAMETER },
     { 'y', "cache-every", HAS_PARAMETER },
-    { 'm', "cache-max", HAS_PARAMETER }
+    { 'm', "cache-max", HAS_PARAMETER },
+    { 'd', "dump-mem", HAS_PARAMETER },
+    { 'e', "exits", NO_PARAMETER },
+    { 'x', "access", HAS_PARAMETER },
+    { 'f', "from", HAS_PARAMETER }
   };
   ParsedOption opt;
   if (!Command::parse_option(args, options, &opt)) {
@@ -103,6 +139,18 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
       if (!opt.verify_valid_int(1, 1024))
           return false;
       flags.cache_max = opt.int_value;
+      break;
+    case 'd':
+      flags.dumps.push_back(opt.value);
+      break;
+    case 'e':
+      flags.exits = true;
+      break;
+    case 'x':
+      flags.access.push_back(opt.value);
+      break;
+    case 'f':
+      flags.from_event = strtol(opt.value.c_str(), nullptr, 10);
       break;
     default:
       DEBUG_ASSERT(0 && "Unknown option");
@@ -227,6 +275,190 @@ static Target parse_target(const string& spec) {
   return t;
 }
 
+static remote_code_ptr resolve_break(Task* t, const string& spec, string& location);
+
+// Function entries watched while replaying. Every function named on the
+// command line is armed for the whole replay so that `hits` is exact at
+// every frame; checkpoints save a copy and branches resume counting from it.
+// -D NAME:ADDR:LEN[:EVERY]: a memory range to snapshot at symbol hits, so
+// that successive snapshots can be diffed to see what the program itself
+// changed between two hits (rr records only what the kernel wrote).
+struct Dump {
+  string name;
+  uintptr_t addr;
+  size_t len;
+  long every;
+  long from = 1;        // first hit to dump
+};
+
+static Dump parse_dump(const string& spec) {
+  Dump d;
+  d.every = 1;
+  size_t a = spec.find(':');
+  size_t b = a == string::npos ? a : spec.find(':', a + 1);
+
+  if (a == string::npos || b == string::npos) {
+    fprintf(stderr, "rr detach: -d expects NAME:ADDR:LEN[:EVERY], got '%s'\n", spec.c_str());
+    exit(1);
+  }
+  d.name = spec.substr(0, a);
+  d.addr = strtoull(spec.c_str() + a + 1, nullptr, 0);
+  size_t c = spec.find(':', b + 1);
+  d.len = strtoull(spec.substr(b + 1, c == string::npos ? string::npos : c - b - 1).c_str(), nullptr, 0);
+
+  if (c != string::npos) {
+    d.every = strtol(spec.c_str() + c + 1, nullptr, 0);
+    size_t e = spec.find(':', c + 1);
+    if (e != string::npos)
+        d.from = strtol(spec.c_str() + e + 1, nullptr, 0);
+  }
+  if (d.every < 1)
+      d.every = 1;
+
+  return d;
+}
+
+// With -e: a call we are inside of, waiting for it to return.
+struct PendingReturn {
+  remote_code_ptr ret;          // return address, read from [sp] at entry
+  remote_ptr<void> sp;          // sp after the return, to tell recursion apart
+  pid_t tid;
+  string sym;
+  long n;
+};
+
+struct Watch {
+  vector<string> symbols;
+  map<string, long> hits;
+  vector<Dump> dumps;
+  string dump_dir;
+  long dumped = 0;
+  bool track_exits = false;
+  vector<PendingReturn> pending;
+  map<string, long> access_every;        // -x: symbol -> EVERY
+  FrameTime from_event = 0;              // -f: no breakpoints before this event
+
+  void dump(Task* t, const string& sym, long n, const char* phase = "") {
+    if (dumps.empty())
+        return;
+    for (const Dump& d : dumps) {
+      if (n < d.from || n % d.every)
+          continue;
+      if (!dumped)
+          mkdir(dump_dir.c_str(), 0755);
+      vector<uint8_t> buf(d.len);
+      bool ok = true;
+      t->read_bytes_helper(remote_ptr<void>(d.addr), d.len, buf.data(), &ok);
+      if (!ok) {
+        fprintf(stderr, "rr detach: dump %s: can't read %zu bytes at %#lx\n",
+                d.name.c_str(), d.len, (unsigned long)d.addr);
+        continue;
+      }
+      char path[PATH_MAX];
+      snprintf(path, sizeof path, "%s/%s.%s.%ld%s.bin", dump_dir.c_str(),
+               d.name.c_str(), sym.c_str(), n, phase);
+      FILE* f = fopen(path, "wb");
+      if (!f) {
+          perror(path);
+          continue;
+      }
+      fwrite(buf.data(), 1, buf.size(), f);
+      fclose(f);
+      dumped++;
+    }
+  }
+  map<string, remote_code_ptr> addr;     // resolved in `resolved_for`
+  AddressSpace* resolved_for = nullptr;
+  size_t resolved_maps = 0;              // mapping count at last resolve
+
+  void resolve(Task* t) {
+    size_t nmaps = 0;
+    for (const auto& m : t->vm()->maps()) {
+        (void)m;
+        nmaps++;
+    }
+    bool incomplete = addr.size() < symbols.size();
+    if (t->vm().get() == resolved_for && !(incomplete && nmaps != resolved_maps))
+      return;
+    resolved_for = t->vm().get();
+    resolved_maps = nmaps;
+    for (const string& sym : symbols) {
+      if (addr.count(sym) && !incomplete)
+          continue;
+      string location;
+      remote_code_ptr a = resolve_break(t, sym, location);
+
+      if (a.is_null())
+          continue;
+      if (!addr.count(sym) || addr[sym] != a)
+        fprintf(stderr, "rr detach: break at %s\n", location.c_str());
+      addr[sym] = a;
+    }
+  }
+  bool arm(AddressSpace& vm) {
+    bool any = false;
+    for (const auto& kv : addr)
+        any |= vm.add_breakpoint(kv.second, BKPT_USER);
+    for (const auto& p : pending)
+        any |= vm.add_breakpoint(p.ret, BKPT_USER);
+    return any;
+  }
+  void disarm(AddressSpace& vm) {
+    for (const auto& kv : addr)
+        vm.remove_breakpoint(kv.second, BKPT_USER);
+    for (const auto& p : pending)
+        vm.remove_breakpoint(p.ret, BKPT_USER);
+  }
+  // At an entry hit: remember where this call will return to.
+  void expect_return(Task* t, const string& sym, long n) {
+    remote_ptr<void> sp = t->regs().sp();
+    uint64_t ra = t->read_mem(sp.cast<uint64_t>());
+    pending.push_back({ remote_code_ptr(ra), sp + 8, t->rec_tid, sym, n });
+  }
+  // Is this stop the return of a pending call? Pops and returns it if so.
+  bool take_return(Task* t, PendingReturn* out) {
+    for (auto it = pending.begin(); it != pending.end(); ++it) {
+      if (it->ret == t->ip() && it->tid == t->rec_tid && it->sp == t->regs().sp()) {
+        *out = *it;
+        pending.erase(it);
+        return true;
+      }
+    }
+    return false;
+  }
+  const string* symbol_at(remote_code_ptr ip) const {
+    for (const auto& kv : addr)
+        if (kv.second == ip)
+            return &kv.first;
+    return nullptr;
+  }
+};
+
+
+// Everything a replay point carries besides the ReplaySession itself: the
+// models of kernel state recreated at hand-off (fds, signals, checks) and the
+// watched functions with their hit counts. A checkpoint keeps a snapshot; a
+// branch starts from one and keeps counting.
+struct ReplayModels {
+  FdModel fd;
+  SignalModel sigs;
+  DetachCheck check;
+  Watch watch;
+
+  ReplayModels snapshot() const {
+    return ReplayModels{ fd.snapshot(), sigs, check, watch };
+  }
+  void observe(const TraceFrame& frame, Task* t) {
+    fd.observe(frame, t);
+    sigs.observe(frame, t);
+    check.observe(frame, t);
+  }
+  long hits_of(const string& sym) const {
+    auto h = watch.hits.find(sym);
+    return h == watch.hits.end() ? 0 : h->second;
+  }
+};
+
 // A live checkpoint: a stopped clone of the replay plus the models as they
 // were there. `time` is the last frame the clone has fully replayed
 // (trace_reader().time() - 1 at clone time); a branch taken from it is
@@ -234,10 +466,7 @@ static Target parse_target(const string& spec) {
 struct Checkpoint {
   FrameTime time;
   ReplaySession::shr_ptr session;
-  FdModel fd;
-  SignalModel sigs;
-  DetachCheck check;
-  std::map<string, long> hits;     // function entries seen so far (Watch::hits)
+  ReplayModels models;
   uint64_t last_used;
 };
 
@@ -254,17 +483,15 @@ public:
   void set_pending(const vector<Target>& targets) { pending_ = targets; }
   void pop_pending() { if (!pending_.empty()) pending_.erase(pending_.begin()); }
 
-  bool take(ReplaySession& s, const FdModel& fd, const SignalModel& sigs,
-            const DetachCheck& check, const std::map<string, long>& hits,
-            FrameTime time) {
+  bool take(ReplaySession& s, const ReplayModels& m, FrameTime time) {
     if (by_time_.count(time)) {
       return false;
     }
-    Checkpoint c{ time, s.clone(), fd.snapshot(), sigs, check, hits, ++tick_ };
+    Checkpoint c{ time, s.clone(), m.snapshot(), ++tick_ };
     by_time_.emplace(time, std::move(c));
     fprintf(stderr, "rr detach: checkpoint at event %lld (%zu cached)\n",
             (long long)time, by_time_.size());
-    evict(time, hits);
+    evict(time, m.watch.hits);
     return true;
   }
 
@@ -296,8 +523,7 @@ private:
       if (t.by_event()) {
         ok = c.time <= t.event;
       } else {
-        auto h = c.hits.find(t.symbol);
-        ok = (h == c.hits.end() ? 0 : h->second) < t.hit;
+        ok = c.models.hits_of(t.symbol) < t.hit;
       }
       if (ok) best = &c;
     }
@@ -311,8 +537,10 @@ private:
       auto h = hits.find(t.symbol);
       bool behind = t.by_event() ? t.event <= pos
                                  : (h == hits.end() ? 0 : h->second) >= t.hit;
-      if (!behind) continue;
-      if (Checkpoint* c = find_before(t)) keep.insert(c->time);
+      if (!behind)
+          continue;
+      if (Checkpoint* c = find_before(t))
+          keep.insert(c->time);
     }
     return keep;
   }
@@ -322,12 +550,14 @@ private:
     while (by_time_.size() > max_ + 1) {
       auto victim = by_time_.end();
       for (auto it = std::next(by_time_.begin()); it != by_time_.end(); ++it) {
-        if (keep.count(it->first)) continue;
+        if (keep.count(it->first))
+            continue;
         if (victim == by_time_.end() || it->second.last_used < victim->second.last_used) {
           victim = it;
         }
       }
-      if (victim == by_time_.end()) break;     // everything left is pinned
+      if (victim == by_time_.end())
+          break;     // everything left is pinned
       fprintf(stderr, "rr detach: evicting checkpoint at event %lld\n",
               (long long)victim->first);
       by_time_.erase(victim);             // ~ReplaySession: tasks killed, emufs freed
@@ -351,10 +581,13 @@ struct SymbolMap {
   string lookup(remote_code_ptr ip) const {
     uintptr_t v = ip.register_value() - (relative ? base : 0);
     auto it = by_addr.upper_bound(v);
-    if (it == by_addr.begin()) return "?";
+
+    if (it == by_addr.begin())
+        return "?";
     --it;
     char buf[32];
     snprintf(buf, sizeof buf, "+%#lx", (unsigned long)(v - it->first));
+
     return it->second + buf;
   }
 };
@@ -364,17 +597,22 @@ struct SymbolMaps {
   vector<SymbolMap> maps;
 
   void build(Task* t, bool force = false) {
-    if (t->vm().get() == built_for && !force) return;
+
+    if (t->vm().get() == built_for && !force)
+        return;
     maps.clear();
     for (const auto& m : t->vm()->maps()) {
       const KernelMapping& km = m.map;
       if (!(km.prot() & PROT_EXEC) || km.fsname().empty() || km.fsname()[0] != '/')
         continue;
       ScopedFd fd(km.fsname().c_str(), O_RDONLY);
-      if (!fd.is_open()) continue;
+      if (!fd.is_open())
+          continue;
+
       ElfFileReader reader(fd);
       SymbolTable syms = reader.read_symbols(".symtab", ".strtab");
       SymbolMap sm{km.start(), km.end(), 0, false, {}};
+
       for (const auto& m2 : t->vm()->maps())
         if (m2.map.fsname() == km.fsname() && m2.map.file_offset_bytes() == 0) {
           sm.base = m2.map.start().as_int();
@@ -383,7 +621,8 @@ struct SymbolMaps {
       uintptr_t highest = 0;
       for (size_t i = 0; i < syms.size(); i++) {
         const char* n = syms.name(i);
-        if (!syms.addr(i) || !n || !*n) continue;
+        if (!syms.addr(i) || !n || !*n)
+            continue;
         sm.by_addr.emplace(syms.addr(i), n);
         highest = max(highest, syms.addr(i));
       }
@@ -395,7 +634,8 @@ struct SymbolMaps {
   const SymbolMap* map_for(remote_code_ptr ip) const {
     remote_ptr<void> p = ip.to_data_ptr<void>();
     for (const auto& m : maps)
-      if (p >= m.start && p < m.end) return &m;
+      if (p >= m.start && p < m.end)
+          return &m;
     return nullptr;
   }
   // Mappings come and go (dlopen, ld.so loading libc); on a miss rebuild once.
@@ -462,65 +702,183 @@ static remote_code_ptr resolve_break(Task* t, const string& spec, string& locati
 }
 
 
-// Function entries watched while replaying. Every function named on the
-// command line is armed for the whole replay so that `hits` is exact at
-// every frame; checkpoints save a copy and branches resume counting from it.
-struct Watch {
-  vector<string> symbols;
-  map<string, long> hits;
-  map<string, remote_code_ptr> addr;     // resolved in `resolved_for`
-  AddressSpace* resolved_for = nullptr;
-  size_t resolved_maps = 0;              // mapping count at last resolve
+// -x: single-step one call of `sym` (hit `n`) from its entry to its return,
+// decoding each instruction to log the memory it reads and writes. Follows
+// into callees, so the log is the call's dynamic dependency set. Returns
+// false if the trace ended first.
+#ifdef HAVE_CAPSTONE
+static uint64_t reg_value(const NativeArch::user_regs_struct& u, x86_reg r, uint64_t next_ip) {
+  switch (r) {
+    case X86_REG_RAX: return u.rax;  case X86_REG_EAX: return (uint32_t)u.rax;
+    case X86_REG_RBX: return u.rbx;  case X86_REG_EBX: return (uint32_t)u.rbx;
+    case X86_REG_RCX: return u.rcx;  case X86_REG_ECX: return (uint32_t)u.rcx;
+    case X86_REG_RDX: return u.rdx;  case X86_REG_EDX: return (uint32_t)u.rdx;
+    case X86_REG_RSI: return u.rsi;  case X86_REG_ESI: return (uint32_t)u.rsi;
+    case X86_REG_RDI: return u.rdi;  case X86_REG_EDI: return (uint32_t)u.rdi;
+    case X86_REG_RBP: return u.rbp;  case X86_REG_EBP: return (uint32_t)u.rbp;
+    case X86_REG_RSP: return u.rsp;  case X86_REG_ESP: return (uint32_t)u.rsp;
+    case X86_REG_R8:  return u.r8;   case X86_REG_R8D:  return (uint32_t)u.r8;
+    case X86_REG_R9:  return u.r9;   case X86_REG_R9D:  return (uint32_t)u.r9;
+    case X86_REG_R10: return u.r10;  case X86_REG_R10D: return (uint32_t)u.r10;
+    case X86_REG_R11: return u.r11;  case X86_REG_R11D: return (uint32_t)u.r11;
+    case X86_REG_R12: return u.r12;  case X86_REG_R12D: return (uint32_t)u.r12;
+    case X86_REG_R13: return u.r13;  case X86_REG_R13D: return (uint32_t)u.r13;
+    case X86_REG_R14: return u.r14;  case X86_REG_R14D: return (uint32_t)u.r14;
+    case X86_REG_R15: return u.r15;  case X86_REG_R15D: return (uint32_t)u.r15;
+    case X86_REG_RIP: return next_ip;
+    case X86_REG_INVALID: return 0;
+    default: return 0;
+  }
+}
 
-  void resolve(Task* t) {
-    size_t nmaps = 0;
-    for (const auto& m : t->vm()->maps()) { (void)m; nmaps++; }
-    bool incomplete = addr.size() < symbols.size();
-    if (t->vm().get() == resolved_for && !(incomplete && nmaps != resolved_maps))
-      return;
-    resolved_for = t->vm().get();
-    resolved_maps = nmaps;
-    for (const string& sym : symbols) {
-      if (addr.count(sym) && !incomplete) continue;
-      string location;
-      remote_code_ptr a = resolve_break(t, sym, location);
-      if (a.is_null()) continue;
-      if (!addr.count(sym) || addr[sym] != a)
-        fprintf(stderr, "rr detach: break at %s\n", location.c_str());
-      addr[sym] = a;
+static bool trace_access(ReplaySession& s, const string& sym, long n, const string& dir) {
+  static csh cs = 0;
+  if (!cs) {
+    if (cs_open(CS_ARCH_X86, CS_MODE_64, &cs) != CS_ERR_OK) {
+      fprintf(stderr, "rr detach: capstone init failed\n");
+      exit(1);
     }
+    cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
   }
-  bool arm(AddressSpace& vm) {
-    bool any = false;
-    for (const auto& kv : addr) any |= vm.add_breakpoint(kv.second, BKPT_USER);
-    return any;
-  }
-  void disarm(AddressSpace& vm) {
-    for (const auto& kv : addr) vm.remove_breakpoint(kv.second, BKPT_USER);
-  }
-  const string* symbol_at(remote_code_ptr ip) const {
-    for (const auto& kv : addr) if (kv.second == ip) return &kv.first;
-    return nullptr;
-  }
-};
+  Task* t = s.current_task();
+  remote_ptr<void> sp0 = t->regs().sp();
+  uint64_t ret = t->read_mem(sp0.cast<uint64_t>());
+  mkdir(dir.c_str(), 0755);
+  char path[PATH_MAX];
+  snprintf(path, sizeof path, "%s/access.%s.%ld.txt", dir.c_str(), sym.c_str(), n);
+  FILE* f = fopen(path, "w");
+  if (!f) { perror(path); exit(1); }
+  fprintf(f, "# %s hit %ld tid %d entry sp %#lx ret %#lx\n# ip rw addr size value insn\n",
+          sym.c_str(), n, t->rec_tid, (unsigned long)sp0.as_int(), (unsigned long)ret);
 
+  const long limit = 2000000;
+  long steps = 0;
+  bool ok_end = true;
+  for (; steps < limit; steps++) {
+    t = s.current_task();
+    if (!t) { ok_end = false; break; }
+    uint64_t ip = t->ip().register_value();
+    if (ip == ret && t->regs().sp() == sp0 + 8)
+      break;                                            // back in the caller
+    NativeArch::user_regs_struct u = t->regs().get_ptrace();
+    uint8_t code[16];
+    bool rd = true;
+    t->read_bytes_helper(remote_ptr<void>(ip), sizeof code, code, &rd);
+    cs_insn* insn = nullptr;
+    size_t cnt = rd ? cs_disasm(cs, code, sizeof code, ip, 1, &insn) : 0;
+    if (cnt == 1) {
+      uint64_t next_ip = ip + insn->size;
+      const cs_x86& x = insn->detail->x86;
+      // Reads are logged with the value before the step; writes are queued
+      // and logged with the value after it.
+      auto hex_at = [&](uint64_t addr, unsigned size, string* out) {
+        unsigned n = size > 64 ? 64 : size;
+        uint8_t buf[64];
+        bool ok = true;
+        t->read_bytes_helper(remote_ptr<void>(addr), n, buf, &ok);
+        if (!ok) { *out = "?"; return; }
+        char h[3];
+        for (unsigned i = 0; i < n; i++) { snprintf(h, sizeof h, "%02x", buf[i]); *out += h; }
+        if (n < size) *out += "..";
+      };
+      struct Pending { char rw; uint64_t addr; unsigned size; string text; };
+      vector<Pending> writes;
+      auto log = [&](char rw, uint64_t addr, unsigned size) {
+        string text = string(insn->mnemonic) + " " + insn->op_str;
+        if (rw == 'W') { writes.push_back({rw, addr, size, text}); return; }
+        string v; hex_at(addr, size, &v);
+        fprintf(f, "%#lx %c %#lx %u %s %s\n", (unsigned long)ip, rw, (unsigned long)addr,
+                size, v.c_str(), text.c_str());
+      };
+      for (uint8_t i = 0; i < x.op_count; i++) {
+        const cs_x86_op& op = x.operands[i];
+        if (op.type != X86_OP_MEM) continue;
+        if (insn->id == X86_INS_LEA || insn->id == X86_INS_NOP) continue;
+        uint64_t addr = (uint64_t)op.mem.disp;
+        addr += reg_value(u, (x86_reg)op.mem.base, next_ip);
+        addr += reg_value(u, (x86_reg)op.mem.index, next_ip) * (op.mem.scale ? op.mem.scale : 1);
+        if (op.mem.segment == X86_REG_FS) addr += u.fs_base;
+        if (op.mem.segment == X86_REG_GS) addr += u.gs_base;
+        if (op.access & CS_AC_READ)  log('R', addr, op.size);
+        if (op.access & CS_AC_WRITE) log('W', addr, op.size);
+        if (!(op.access & (CS_AC_READ | CS_AC_WRITE))) log('?', addr, op.size);
+      }
+      // Implicit stack / string accesses that have no memory operand.
+      switch (insn->id) {
+        case X86_INS_PUSH: case X86_INS_CALL: log('W', u.rsp - 8, 8); break;
+        case X86_INS_POP:  case X86_INS_RET:  log('R', u.rsp, 8); break;
+        case X86_INS_LEAVE: log('R', u.rbp, 8); break;
+        case X86_INS_MOVSB: case X86_INS_MOVSW: case X86_INS_MOVSD: case X86_INS_MOVSQ:
+        case X86_INS_STOSB: case X86_INS_STOSW: case X86_INS_STOSD: case X86_INS_STOSQ:
+        case X86_INS_LODSB: case X86_INS_LODSW: case X86_INS_LODSD: case X86_INS_LODSQ:
+        case X86_INS_CMPSB: case X86_INS_CMPSW: case X86_INS_CMPSD: case X86_INS_CMPSQ: {
+          unsigned esz = 1;
+          switch (insn->id) {
+            case X86_INS_MOVSW: case X86_INS_STOSW: case X86_INS_LODSW: case X86_INS_CMPSW: esz = 2; break;
+            case X86_INS_MOVSD: case X86_INS_STOSD: case X86_INS_LODSD: case X86_INS_CMPSD: esz = 4; break;
+            case X86_INS_MOVSQ: case X86_INS_STOSQ: case X86_INS_LODSQ: case X86_INS_CMPSQ: esz = 8; break;
+            default: break;
+          }
+          bool rep = x.prefix[0] == X86_PREFIX_REP || x.prefix[0] == X86_PREFIX_REPNE;
+          uint64_t bytes = esz * (rep ? (u.rcx ? u.rcx : 1) : 1);
+          if (bytes > (1u << 20)) bytes = 1u << 20;
+          bool src = insn->id <= X86_INS_MOVSQ ? true : false;   // movs: rsi read, rdi write
+          switch (insn->id) {
+            case X86_INS_MOVSB: case X86_INS_MOVSW: case X86_INS_MOVSD: case X86_INS_MOVSQ:
+              log('R', u.rsi, bytes); log('W', u.rdi, bytes); break;
+            case X86_INS_STOSB: case X86_INS_STOSW: case X86_INS_STOSD: case X86_INS_STOSQ:
+              log('W', u.rdi, bytes); break;
+            case X86_INS_LODSB: case X86_INS_LODSW: case X86_INS_LODSD: case X86_INS_LODSQ:
+              log('R', u.rsi, bytes); break;
+            default:
+              log('R', u.rsi, bytes); log('R', u.rdi, bytes); break;
+          }
+          (void)src;
+          break;
+        }
+        default: break;
+      }
+      cs_free(insn, cnt);
+      if (s.replay_step(RUN_SINGLESTEP).status == REPLAY_EXITED) { ok_end = false; break; }
+      t = s.current_task();
+      for (const Pending& w : writes) {
+        string v;
+        if (t) hex_at(w.addr, w.size, &v); else v = "?";
+        fprintf(f, "%#lx W %#lx %u %s %s\n", (unsigned long)ip, (unsigned long)w.addr,
+                w.size, v.c_str(), w.text.c_str());
+      }
+      continue;
+    } else {
+      fprintf(f, "%#lx ? 0 0 - (undecodable)\n", (unsigned long)ip);
+    }
+    if (s.replay_step(RUN_SINGLESTEP).status == REPLAY_EXITED) { ok_end = false; break; }
+  }
+  fprintf(f, "# %ld instructions%s\n", steps, steps >= limit ? " (limit reached)" : "");
+  fclose(f);
+  if (trace_frames)
+    fprintf(stderr, "access %s #%ld: %ld instructions -> %s\n", sym.c_str(), n, steps, path);
+  return ok_end;
+}
+#else
+static bool trace_access(ReplaySession&, const string&, long, const string&) {
+  fprintf(stderr, "rr detach: -x needs capstone (rebuild with capstone-devel installed)\n");
+  exit(1);
+}
+#endif
 
 // Replay `s` until `target`. Returns the last completed frame (-1 if the
 // trace ended first). With `store`, clones a checkpoint every `every` frames.
-static FrameTime run_until(ReplaySession& s, FdModel& model, SignalModel& sigs,
-                           DetachCheck& check, Watch& watch, const Target& target,
+static FrameTime run_until(ReplaySession& s, ReplayModels& m, const Target& target,
                            CheckpointStore* store, FrameTime every) {
   s.on_task_cloned = [&](Task* parent, Task* child, int flags) {
-    model.fork_task(parent, child, flags);
+    m.fd.fork_task(parent, child, flags);
   };
   FrameTime next_ckpt = every ? ((s.trace_reader().time() / every) + 1) * every : 0;
   FrameTime stopped_at = -1;
   while (true) {
     Task* cur = s.current_task();
     if (cur) {
-      model.observe(s.current_trace_frame(), cur);
-      sigs.observe(s.current_trace_frame(), cur);
-      check.observe(s.current_trace_frame(), cur);
+      m.observe(s.current_trace_frame(), cur);
     }
     // For CRRIU_TRACE: the frame about to be replayed, and its symbol map
     // (resolved now, while the task that will execute it is current).
@@ -537,13 +895,14 @@ static FrameTime run_until(ReplaySession& s, FdModel& model, SignalModel& sigs,
     // armed would carry the int3 into the branch.
     AddressSpace::shr_ptr vm = cur ? cur->vm() : nullptr;
     bool armed = false;
-    if (vm && s.done_initial_exec() && !watch.symbols.empty()) {
-      watch.resolve(cur);
-      armed = watch.arm(*vm);
+    if (vm && s.done_initial_exec() && !m.watch.symbols.empty() &&
+        before >= m.watch.from_event) {
+      m.watch.resolve(cur);
+      armed = m.watch.arm(*vm);
     }
     auto result = s.replay_step(RUN_CONTINUE);
     if (armed)
-      watch.disarm(*vm);
+      m.watch.disarm(*vm);
     if (trace_frames && s.trace_reader().time() > before) {   // frame completed
       string ret;
       if (pending.event().is_syscall_event() &&
@@ -569,15 +928,55 @@ static FrameTime run_until(ReplaySession& s, FdModel& model, SignalModel& sigs,
 
     if (result.break_status.breakpoint_hit) {
       Task* t = result.break_status.task_context.task;
-      const string* sym = t ? watch.symbol_at(t->ip()) : nullptr;
+      const string* sym = t ? m.watch.symbol_at(t->ip()) : nullptr;
+
+      PendingReturn pr;
       if (sym) {
-        long n = ++watch.hits[*sym];
+        long n = ++m.watch.hits[*sym];
+        m.watch.dump(t, *sym, n);
+        if (m.watch.track_exits)
+          m.watch.expect_return(t, *sym, n);
         if (trace_frames)
-          fprintf(stderr, "hit %s #%ld tid %d after frame %lld\n", sym->c_str(), n,
-                  t->rec_tid, (long long)stopped_at);
+        {
+          NativeArch::user_regs_struct u = t->regs().get_ptrace();
+          uint64_t st[4] = { 0, 0, 0, 0 };       // [sp]=return addr, then stack args
+          bool ok = true;
+          t->read_bytes_helper(remote_ptr<void>(u.rsp), sizeof st, st, &ok);
+          fprintf(stderr, "hit %s #%ld tid %d after frame %lld"
+                  " rdi %#lx rsi %#lx rdx %#lx rcx %#lx r8 %#lx r9 %#lx"
+                  " ra %#lx s1 %#lx s2 %#lx s3 %#lx\n",
+                  sym->c_str(), n, t->rec_tid, (long long)stopped_at,
+                  (unsigned long)u.rdi, (unsigned long)u.rsi, (unsigned long)u.rdx,
+                  (unsigned long)u.rcx, (unsigned long)u.r8, (unsigned long)u.r9,
+                  (unsigned long)st[0], (unsigned long)st[1], (unsigned long)st[2],
+                  (unsigned long)st[3]);
+        }
         if (!target.by_event() && *sym == target.symbol && n >= target.hit &&
             frame_allows_branch(s))
           break;
+        auto ae = m.watch.access_every.find(*sym);
+        if (ae != m.watch.access_every.end() && n % ae->second == 0) {
+          if (!trace_access(s, *sym, n, m.watch.dump_dir)) {
+            stopped_at = -1;
+            break;
+          }
+          stopped_at = s.trace_reader().time() - 1;
+          Task* cur = s.current_task();
+          if (cur && m.watch.take_return(cur, &pr)) {     // we stepped onto the return
+            if (trace_frames)
+              fprintf(stderr, "ret %s #%ld tid %d rax %#lx after frame %lld\n",
+                      pr.sym.c_str(), pr.n, cur->rec_tid,
+                      (unsigned long)cur->regs().ax(), (long long)stopped_at);
+            m.watch.dump(cur, pr.sym, pr.n, ".exit");
+          }
+          continue;                                   // already off the breakpoint
+        }
+      } else if (t && m.watch.take_return(t, &pr)) {
+        if (trace_frames)
+          fprintf(stderr, "ret %s #%ld tid %d rax %#lx after frame %lld\n",
+                  pr.sym.c_str(), pr.n, t->rec_tid,
+                  (unsigned long)t->regs().ax(), (long long)stopped_at);
+        m.watch.dump(t, pr.sym, pr.n, ".exit");
       }
       // Step off the breakpoint address (disarmed right now).
       if (s.replay_step(RUN_SINGLESTEP).status == REPLAY_EXITED) {
@@ -587,7 +986,7 @@ static FrameTime run_until(ReplaySession& s, FdModel& model, SignalModel& sigs,
       continue;                                    // mid-frame: no checkpoint
     }
     if (store && every && stopped_at >= next_ckpt && s.can_clone()) {
-      store->take(s, model, sigs, check, watch.hits, stopped_at);
+      store->take(s, m, stopped_at);
       next_ckpt = (stopped_at / every + 1) * every;
     }
     if (target.by_event() && s.trace_reader().time() > target.event && s.can_clone())
@@ -597,11 +996,7 @@ static FrameTime run_until(ReplaySession& s, FdModel& model, SignalModel& sigs,
   return stopped_at;
 }
 
-
-
-
-static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
-                    DetachCheck& check, const DetachFlags& flags,
+static int hand_off(ReplaySession& session, ReplayModels& m, const DetachFlags& flags,
                     FrameTime stopped_at, const char* tag) {
   // 2. Collect tasks.
   vector<Task*> tasks;
@@ -616,12 +1011,13 @@ static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
 
   pid_t real_pid = tasks[0]->tid;
 
-  for (const string& f : check.run(tasks, model)) {
+  for (const string& f : m.check.run(tasks, m.fd)) {
     fprintf(stderr, "rr detach: %s%s\n", flags.strict ? "" : "warning: ", f.c_str());
-    if (flags.strict) return 1;
+    if (flags.strict)
+        return 1;
   }
 
-  model.forget_materialized();
+  m.fd.forget_materialized();
 
   // 3. Close rr-internal FDs once per shared file table.
   std::set<FdTable*> done_tables;
@@ -631,7 +1027,7 @@ static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
 
   // Restore working directories before recreating file descriptors.
   for (Task* t : tasks) {
-    if (!model.apply_cwd(t)) {
+    if (!m.fd.apply_cwd(t)) {
       fprintf(stderr,
               "rr detach: failed to restore cwd for tid=%d\n",
               t->rec_tid);
@@ -640,12 +1036,12 @@ static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
   }
 
   for (Task* t : tasks) {
-    const void* table_id = model.table_id(t);
+    const void* table_id = m.fd.table_id(t);
 
     if (!restored_tables.insert(table_id).second)
       continue;
 
-    if (!model.materialize(t)) {
+    if (!m.fd.materialize(t)) {
       fprintf(stderr,
               "rr detach: failed to recreate fds for tid=%d\n",
               t->rec_tid);
@@ -654,7 +1050,7 @@ static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
   }
 
   for (Task* t : tasks) {
-    if (!sigs.materialize(t)) {
+    if (!m.sigs.materialize(t)) {
       fprintf(stderr, "rr detach: failed to restore signal state\n");
       return 1;
     }
@@ -739,12 +1135,41 @@ static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
     regs.set_original_syscallno(-1);
     t->set_regs(regs);
 
-
     bool flushed = t->flush_regs();
     LOG(debug) << "tid " << t->tid << ": flushed=" << flushed
                << " ip=" << t->ip();
   }
 
+  // CRRIU_TRACE: exactly what is handed off (after the register fix-ups
+  // above), to compare with a debugger attached to the branch.
+  if (trace_frames) {
+    static SymbolMaps symbols;
+    for (Task* t : tasks) {
+      const Registers& r = t->regs();
+      symbols.build(t);
+      fprintf(stderr, "handoff tid %d rec_tid %d ip %#lx (%s) sp %#lx arg1 %#lx arg2 %#lx arg3 %#lx\n",
+              t->tid, t->rec_tid, (unsigned long)r.ip().register_value(),
+              symbols.lookup(t, r.ip()).c_str(), (unsigned long)r.sp().as_int(),
+              (unsigned long)r.arg1(), (unsigned long)r.arg2(), (unsigned long)r.arg3());
+
+      const struct { const char* name; uintptr_t addr; } spots[] = {
+        { "ip", r.ip().register_value() }, { "sp", r.sp().as_int() }, { "arg2", r.arg2() } };
+
+      for (const auto& spot : spots) {
+        uint8_t b[16];
+        bool ok = true;
+        t->read_bytes_helper(remote_ptr<void>(spot.addr), sizeof b, b, &ok);
+        fprintf(stderr, "  mem[%s=%#lx]:", spot.name, (unsigned long)spot.addr);
+        if (!ok) {
+            fprintf(stderr, " unreadable\n");
+            continue;
+        }
+        for (uint8_t x : b)
+            fprintf(stderr, " %02x", x);
+        fprintf(stderr, "\n");
+      }
+    }
+  }
 
   // 4b. Release all tasks, stopped.
   for (Task* t : tasks) {
@@ -768,30 +1193,21 @@ static int hand_off(ReplaySession& session, FdModel& model, SignalModel& sigs,
   return 0;
 }
 
-
-
-// A branch that is handed off right away does not replay on, so ticks
-// slop in the current frame (which can_clone() refuses) does not matter;
-// only frames where tasks are going away are off limits.
-
-
 // Clone `src` (a checkpoint or the live replay), replay the clone on to
 // `target` if asked, hand it off as branch `branch_no`.
-static int branch_from(ReplaySession& src, const FdModel& fd, const SignalModel& sigs,
-                       const DetachCheck& check, const Watch& watch,
-                       const std::map<string, long>& hits, const Target& target,
-                       bool replay_on, const DetachFlags& flags, size_t branch_no,
-                       const char* how) {
+// Clone `src` (a checkpoint or the live replay) with its models, replay the
+// clone on to `target` if that is still ahead, hand it off as branch
+// `branch_no`.
+static int branch_from(ReplaySession& src, const ReplayModels& models,
+                       const Target& target, const DetachFlags& flags,
+                       size_t branch_no, const char* how) {
   ReplaySession::shr_ptr b = src.clone();
-  FdModel bm = fd.snapshot();
-  SignalModel bs = sigs;
-  DetachCheck bc = check;
-  Watch bw;
-  bw.symbols = watch.symbols;
-  bw.hits = hits;                       // counting continues from the checkpoint
+  ReplayModels m = models.snapshot();          // counting continues from here
   FrameTime at = src.trace_reader().time() - 1;
-  if (replay_on) {
-    at = run_until(*b, bm, bs, bc, bw, target, nullptr, 0);
+  bool ahead = target.by_event() ? target.event > at
+                                 : m.hits_of(target.symbol) < target.hit;
+  if (ahead) {
+    at = run_until(*b, m, target, nullptr, 0);
     if (at < 0) {
       fprintf(stderr, "rr detach: trace ended before '%s'\n", target.text.c_str());
       return 1;
@@ -799,27 +1215,40 @@ static int branch_from(ReplaySession& src, const FdModel& fd, const SignalModel&
   }
   ScopedFd bin, bout;
   string stdio_note;
-  if (!open_branch_stdio(flags.output_dir, branch_no, bm, bin, bout, stdio_note))
+  if (!open_branch_stdio(flags.output_dir, branch_no, m.fd, bin, bout, stdio_note))
     return 1;
   char tag[PATH_MAX + 96];
   snprintf(tag, sizeof tag, " [branch %zu: '%s' %s]%s", branch_no, target.text.c_str(), how,
            stdio_note.c_str());
-  int rc = hand_off(*b, bm, bs, bc, flags, at, tag);   // hand_off ends with forget_tasks()
-  bm.clear_stdio_targets();
+  int rc = hand_off(*b, m, flags, at, tag);   // hand_off ends with forget_tasks()
+  m.fd.clear_stdio_targets();
   return rc;
 }
 
-static int detach_cached(ReplaySession::shr_ptr session, FdModel& model,
-                         SignalModel& sigs, DetachCheck& check,
+static int detach_cached(ReplaySession::shr_ptr session, ReplayModels& live,
                          const DetachFlags& flags) {
   CheckpointStore store(flags.cache_max);
+  Watch& watch = live.watch;
 
   vector<Target> targets;
-  Watch watch;
+  for (const string& spec : flags.dumps)
+      watch.dumps.push_back(parse_dump(spec));
+  watch.dump_dir = flags.output_dir.empty() ? "crriu-dumps" : flags.output_dir;
+  watch.track_exits = flags.exits;
+  watch.from_event = flags.from_event;
+  for (const string& spec : flags.access) {
+    size_t colon = spec.rfind(':');
+    string sym = colon == string::npos ? spec : spec.substr(0, colon);
+    long every = colon == string::npos ? 1 : strtol(spec.c_str() + colon + 1, nullptr, 10);
+    watch.access_every[sym] = every < 1 ? 1 : every;
+    watch.symbols.push_back(sym);
+  }
+
   Target ckpt;
   if (!flags.checkpoint.empty()) {
     ckpt = parse_target(flags.checkpoint);
-    if (!ckpt.by_event()) watch.symbols.push_back(ckpt.symbol);
+    if (!ckpt.by_event())
+        watch.symbols.push_back(ckpt.symbol);
   }
   for (const string& spec : flags.resume_to) {
     targets.push_back(parse_target(spec));
@@ -832,19 +1261,16 @@ static int detach_cached(ReplaySession::shr_ptr session, FdModel& model,
 
   // Base checkpoint: first clone-safe point after the recorded program
   // exec'd. Every "behind" request can at worst start from here.
-  session->on_task_cloned = [&](Task* p, Task* c, int f) { model.fork_task(p, c, f); };
+  session->on_task_cloned = [&](Task* p, Task* c, int f) { live.fd.fork_task(p, c, f); };
   while (!(session->done_initial_exec() && session->can_clone())) {
-    if (Task* cur = session->current_task()) {
-      model.observe(session->current_trace_frame(), cur);
-      sigs.observe(session->current_trace_frame(), cur);
-      check.observe(session->current_trace_frame(), cur);
-    }
+    if (Task* cur = session->current_task())
+      live.observe(session->current_trace_frame(), cur);
     if (session->replay_step(RUN_CONTINUE).status == REPLAY_EXITED) {
       fprintf(stderr, "rr detach: trace ended before the program exec'd\n");
       return 1;
     }
   }
-  store.take(*session, model, sigs, check, watch.hits, session->trace_reader().time() - 1);
+  store.take(*session, live, session->trace_reader().time() - 1);
 
   // -k TARGET: an explicit checkpoint (frame targets only; a function entry
   // is mid-frame and cannot be cloned).
@@ -853,45 +1279,42 @@ static int detach_cached(ReplaySession::shr_ptr session, FdModel& model,
       fprintf(stderr, "rr detach: -k takes an event number\n");
       return 1;
     }
-    FrameTime at = run_until(*session, model, sigs, check, watch, ckpt, &store, flags.cache_every);
+    FrameTime at = run_until(*session, live, ckpt, &store, flags.cache_every);
     if (at < 0) {
       fprintf(stderr, "rr detach: trace ended before the checkpoint\n");
       return 1;
     }
-    store.take(*session, model, sigs, check, watch.hits, at);
+    store.take(*session, live, at);
   }
 
   size_t branch_no = 1;
   for (const Target& t : targets) {
     FrameTime pos = session->trace_reader().time() - 1;
-    bool behind = t.by_event() ? t.event <= pos : watch.hits[t.symbol] >= t.hit;
+    bool behind = t.by_event() ? t.event <= pos : live.hits_of(t.symbol) >= t.hit;
     ReplaySession* src = session.get();
-    const FdModel* fd = &model;
-    const SignalModel* sg = &sigs;
-    const DetachCheck* ck = &check;
-    const std::map<string, long>* hits = &watch.hits;
-    bool replay_on = false;
+    const ReplayModels* models = &live;
     char how[64] = "from the replay";
+
     if (behind) {
       Checkpoint* c = store.nearest_before(t);
       if (!c) {
         fprintf(stderr, "rr detach: '%s' is before the base checkpoint\n", t.text.c_str());
         return 1;
       }
-      src = c->session.get(); fd = &c->fd; sg = &c->sigs; ck = &c->check; hits = &c->hits;
-      replay_on = t.by_event() ? t.event > c->time : true;
+      src = c->session.get();
+      models = &c->models;
       snprintf(how, sizeof how, "from checkpoint %lld", (long long)c->time);
     } else {
-      FrameTime at = run_until(*session, model, sigs, check, watch, t, &store, flags.cache_every);
+      FrameTime at = run_until(*session, live, t, &store, flags.cache_every);
       if (at < 0) {
         fprintf(stderr, "rr detach: trace ended before '%s'\n", t.text.c_str());
         return 1;
       }
       if (t.by_event())                       // a function entry is mid-frame
-        store.take(*session, model, sigs, check, watch.hits, at);
+        store.take(*session, live, at);
     }
     for (int k = 0; k < flags.clones; k++, branch_no++) {
-      int rc = branch_from(*src, *fd, *sg, *ck, watch, *hits, t, replay_on, flags, branch_no, how);
+      int rc = branch_from(*src, *models, t, flags, branch_no, how);
       if (rc)
         return rc;
     }
@@ -932,18 +1355,13 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     cwd.assign(buf, n);
     fprintf(stderr, "rr detach: assuming recording cwd %s; pass --cwd if different\n", cwd.c_str());
   }
-  FdModel model(cwd);
-  model.init_task(session->current_task());
+  ReplayModels live{ FdModel(cwd), SignalModel(), DetachCheck(), Watch() };
+  live.fd.init_task(session->current_task());
+  session->on_task_cloned = [&](Task* parent, Task* child, int flags) {
+    live.fd.fork_task(parent, child, flags);
+  };
 
-  session->on_task_cloned =
-    [&](Task* parent, Task* child, int flags) {
-        model.fork_task(parent, child, flags);
-    };
-
-  SignalModel sigs;
-  DetachCheck check;
-
-  return detach_cached(session, model, sigs, check, flags);
+  return detach_cached(session, live, flags);
 }
 
 int DetachCommand::run(vector<string>& args) {

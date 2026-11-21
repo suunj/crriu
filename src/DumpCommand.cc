@@ -59,6 +59,7 @@ static bool parse_dump_arg(vector<string>& args, DumpFlags& flags) {
   static const OptionSpec options[] = {
     { 0, "socket-addresses", NO_PARAMETER },
     { 'b', "syscallbuf", NO_PARAMETER },
+    { 'd', "recorded-data", NO_PARAMETER },
     { 'e', "task-events", NO_PARAMETER },
     { 'm', "recorded-metadata", NO_PARAMETER },
     { 'p', "mmaps", NO_PARAMETER },
@@ -74,6 +75,9 @@ static bool parse_dump_arg(vector<string>& args, DumpFlags& flags) {
   switch (opt.short_name) {
     case 'b':
       flags.dump_syscallbuf = true;
+      break;
+    case 'd':
+      flags.dump_recorded_data = true;
       break;
     case 'e':
       flags.dump_task_events = true;
@@ -264,7 +268,8 @@ static void dump_events_matching(TraceReader& trace, const DumpFlags& flags,
   }
 
   bool process_raw_data =
-      flags.dump_syscallbuf || flags.dump_recorded_data_metadata;
+      flags.dump_syscallbuf || flags.dump_recorded_data_metadata ||
+      flags.dump_recorded_data;
   while (!trace.at_end()) {
     auto frame = trace.read_frame(start);
     if (end < frame.time()) {
@@ -328,6 +333,22 @@ static void dump_events_matching(TraceReader& trace, const DumpFlags& flags,
         }
       }
 
+      if (flags.dump_recorded_data) {
+        // Memory this frame wrote into the tracee (what replay copies in).
+        TraceReader::RawData d;
+        while (trace.read_raw_data_for_frame(d)) {
+          fprintf(out, "  { tid:%d, addr:%p, length:%p }", d.rec_tid,
+                  (void*)d.addr.as_int(), (void*)d.data.size());
+          size_t n = std::min<size_t>(d.data.size(), 1024);
+          for (size_t i = 0; i < n; i++) {
+            fprintf(out, "%s%02x", i % 16 ? " " : "\n    ", d.data[i]);
+          }
+          if (d.data.size() > n) {
+            fprintf(out, " ... (%zu bytes)", d.data.size());
+          }
+          fputc('\n', out);
+        }
+      }
       TraceReader::RawDataMetadata data;
       while (process_raw_data && trace.read_raw_data_metadata_for_frame(data)) {
         if (flags.dump_recorded_data_metadata) {

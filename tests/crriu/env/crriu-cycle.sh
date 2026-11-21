@@ -12,12 +12,12 @@ LOG=$CRRIU_LOG; IMG=$CRRIU_IMG; BR=$CRRIU_BR
 W=$(dirname "$0")
 N=$#
 
-# Leftovers from an earlier cycle would hold pids and FIFOs.
-pkill -f 'bin/rr detach' 2>/dev/null || true
-pkill -KILL -x 'rr:.*' 2>/dev/null || true
-pkill -f 'unshare -pf --mount-proc' 2>/dev/null || true
-pkill -f 'unshare -pf --mount-proc' 2>/dev/null || true
-pkill -f 'criu restore' 2>/dev/null || true
+# Leftovers from an earlier cycle would hold pids and FIFOs. Only ours:
+# the pid namespaces we created (unshare --kill-child takes everything
+# inside down with them).
+for f in "$BR/ns.pid" "$IMG"/*/restore.pid; do
+  [ -f "$f" ] && kill -KILL "$(cat "$f")" 2>/dev/null || true
+done
 sleep 1
 rm -f "$LOG"; rm -rf "$IMG"; mkdir -p "$IMG"
 rm -f "$BR"/branch-*
@@ -25,13 +25,16 @@ rm -f "$BR"/branch-*
 "$W/crriu-detach.sh" "$TRACE" "$LOG" "$@" >/dev/null 2>&1 </dev/null &
 while :; do
   if grep -qsE 'FATAL|ERROR' "$LOG"; then grep -E 'FATAL|ERROR' "$LOG"; exit 1; fi
+  if [ -f "$BR/rr.status" ]; then echo "rr detach exited early: status $(cat "$BR/rr.status")"; tail -5 "$LOG"; exit 1; fi
   c=$(grep -c "detached pid" "$LOG" 2>/dev/null || true); [ "${c:-0}" -ge "$N" ] && break
   sleep 2
 done
 grep 'detached pid' "$LOG"
 
-# rr itself is a member of the namespace; nsenter through it.
-RRHOST=$(pgrep -xn rr)
+# rr itself is a member of the namespace; nsenter through it. Find it via
+# our own namespace: unshare (ns.pid) -> sh (its PID 1) -> rr.
+NSINIT=$(pgrep -P "$(cat "$BR/ns.pid")")
+RRHOST=$(pgrep -P "$NSINIT" -x rr)
 echo "rr host pid: $RRHOST"
 
 k=0
@@ -43,10 +46,10 @@ grep 'detached pid' "$LOG" | while read -r _ _ nspid _; do
   echo "branch $k (ns pid $nspid): dump ok -> $IMG/$k"
 done
 
-# Everything is on disk now; free the pids.
-kill "$RRHOST" 2>/dev/null || true
-pkill -P "$RRHOST" 2>/dev/null || true   # pid-ns init (sleep infinity)
+# Everything is on disk now; free the pids: killing the unshare parent
+# kills the namespace's PID 1 (--kill-child) and with it rr, checkpoints
+# and the dumped branches.
+kill -KILL "$(cat "$BR/ns.pid")" 2>/dev/null || true   # unshare ignores SIGTERM; --kill-child does the rest
 sleep 1
-pkill -KILL -x 'rr:.*' 2>/dev/null || true
 
 exec "$W/crriu-restore.sh" "${RESTORE:-$N}"

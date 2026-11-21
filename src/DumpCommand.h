@@ -18,6 +18,7 @@ namespace rr {
 struct DumpFlags {
   bool dump_syscallbuf;
   bool dump_recorded_data_metadata;
+  bool dump_recorded_data;
   bool dump_mmaps;
   bool dump_task_events;
   bool raw_dump;
@@ -28,6 +29,7 @@ struct DumpFlags {
   DumpFlags()
       : dump_syscallbuf(false),
         dump_recorded_data_metadata(false),
+        dump_recorded_data(false),
         dump_mmaps(false),
         dump_task_events(false),
         raw_dump(false),
