@@ -4,18 +4,18 @@
 #define RR_RR_TASK_TARGET_H_
 
 #include "AddressSpace.h"
-#include "ObserveTarget.h"
 #include "ReplaySession.h"
+#include "hpobs/target.h"
 
 namespace rr {
 
 class Task;
 
-// obs::Target over a task of a replay session. Breakpoints go to the
+// hpobs::Target over a task of a replay session. Breakpoints go to the
 // address space captured at construction, so they can still be removed
 // after the task is gone; step() replays one instruction and then follows
 // the session's current task, which may differ from the one stepped.
-class RrTaskTarget : public obs::Target {
+class RrTaskTarget : public hpobs::Target {
 public:
   RrTaskTarget(ReplaySession& s, Task* t);
 
@@ -23,12 +23,12 @@ public:
 
   pid_t tid() const override;
   bool read(uint64_t addr, void* buf, size_t len) override;
-  obs::Regs regs() override;
-  std::vector<obs::Mapping> maps() override;
-  const void* address_space_id() override;
+  hpobs::Regs regs() override;
+  std::vector<hpobs::Mapping> maps() override;
+  uint64_t address_space_id() override;
   bool add_breakpoint(uint64_t addr) override;
   void remove_breakpoint(uint64_t addr) override;
-  obs::StepStatus step() override;
+  hpobs::StepStatus step() override;
 
 private:
   ReplaySession& s_;

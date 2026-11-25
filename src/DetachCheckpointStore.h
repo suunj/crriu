@@ -40,8 +40,9 @@ public:
   // that one.
   void set_pending(const std::vector<Target>& targets) { pending_ = targets; }
   void pop_pending() {
-    if (!pending_.empty())
+    if (!pending_.empty()) {
       pending_.erase(pending_.begin());
+    }
   }
 
   // Clone `s` here. Caller guarantees s.can_clone(). Duplicates are ignored.
@@ -61,9 +62,9 @@ private:
 
   // Checkpoints a pending, already-passed target will start from.
   std::set<FrameTime> pinned(FrameTime pos,
-                             const std::map<std::string, long>& hits);
+                             const std::map<std::string, int64_t>& hits);
 
-  void evict(FrameTime pos, const std::map<std::string, long>& hits);
+  void evict(FrameTime pos, const std::map<std::string, int64_t>& hits);
 
   std::map<FrameTime, Checkpoint> by_time_;
   std::vector<Target> pending_;

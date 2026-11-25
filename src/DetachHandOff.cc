@@ -19,8 +19,8 @@
 
 #include "AddressSpace.h"
 #include "AutoRemoteSyscalls.h"
-#include "DetachSymbols.h"
 #include "RrTaskTarget.h"
+#include "hpobs/symbols.h"
 #include "FdTable.h"
 #include "ReplayTask.h"
 #include "core.h"
@@ -108,8 +108,15 @@ bool open_branch_stdio(const string& dir, size_t k, FdModel& model,
   return true;
 }
 
+// CRRIU_TRACE: a few addresses whose first bytes are shown at hand-off.
+struct TraceSpot {
+  const char* name;
+  uintptr_t addr;
+};
+
 int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
              FrameTime stopped_at, const char* tag) {
+  detach_init_logging();
   // 2. Collect tasks.
   vector<Task*> tasks;
   for (auto& it : session.tasks()) {
@@ -125,8 +132,9 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
 
   for (const string& f : m.check.run(tasks, m.fd)) {
     fprintf(stderr, "rr detach: %s%s\n", strict ? "" : "warning: ", f.c_str());
-    if (strict)
-        return 1;
+    if (strict) {
+      return 1;
+    }
   }
 
   m.fd.forget_materialized();
@@ -150,8 +158,9 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
   for (Task* t : tasks) {
     const void* table_id = m.fd.table_id(t);
 
-    if (!restored_tables.insert(table_id).second)
+    if (!restored_tables.insert(table_id).second) {
       continue;
+    }
 
     if (!m.fd.materialize(t)) {
       fprintf(stderr,
@@ -170,24 +179,28 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
 
   for (Task* t : tasks) {
     FdTable* table = t->fd_table().get();
-    if (!done_tables.insert(table).second)
+    if (!done_tables.insert(table).second) {
       continue;
+    }
 
     vector<int> rr_fds;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/fd", t->tid);
 
     DIR* d = opendir(path);
-    if (!d)
+    if (!d) {
       FATAL() << "Can't read " << path;
+    }
 
     while (dirent* e = readdir(d)) {
-      if (e->d_name[0] == '.')
+      if (e->d_name[0] == '.') {
         continue;
+      }
 
       int fd = atoi(e->d_name);
-      if (table->is_rr_fd(fd) || fd == RR_MAGIC_SAVE_DATA_FD)
+      if (table->is_rr_fd(fd) || fd == RR_MAGIC_SAVE_DATA_FD) {
         rr_fds.push_back(fd);
+      }
     }
     closedir(d);
 
@@ -255,7 +268,7 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
   // CRRIU_TRACE: exactly what is handed off (after the register fix-ups
   // above), to compare with a debugger attached to the branch.
   if (detach_trace_enabled()) {
-    static SymbolMaps symbols;
+    static hpobs::SymbolMaps symbols;
     for (Task* t : tasks) {
       const Registers& r = t->regs();
       RrTaskTarget tgt(session, t);
@@ -265,10 +278,13 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
               symbols.lookup(tgt, r.ip().register_value()).c_str(), (unsigned long)r.sp().as_int(),
               (unsigned long)r.arg1(), (unsigned long)r.arg2(), (unsigned long)r.arg3());
 
-      const struct { const char* name; uintptr_t addr; } spots[] = {
-        { "ip", r.ip().register_value() }, { "sp", r.sp().as_int() }, { "arg2", r.arg2() } };
+      const TraceSpot spots[] = {
+        { "ip", r.ip().register_value() },
+        { "sp", r.sp().as_int() },
+        { "arg2", r.arg2() },
+      };
 
-      for (const auto& spot : spots) {
+      for (const TraceSpot& spot : spots) {
         uint8_t b[16];
         bool ok = true;
         t->read_bytes_helper(remote_ptr<void>(spot.addr), sizeof b, b, &ok);
@@ -277,8 +293,9 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
             fprintf(stderr, " unreadable\n");
             continue;
         }
-        for (uint8_t x : b)
-            fprintf(stderr, " %02x", x);
+        for (uint8_t x : b) {
+          fprintf(stderr, " %02x", x);
+        }
         fprintf(stderr, "\n");
       }
     }

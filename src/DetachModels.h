@@ -8,9 +8,10 @@
 #include <string>
 
 #include "DetachCheck.h"
-#include "DetachWatch.h"
 #include "FdModel.h"
 #include "SignalModel.h"
+#include "hpobs/log.h"
+#include "hpobs/watch.h"
 
 namespace rr {
 
@@ -24,6 +25,16 @@ inline bool detach_trace_enabled() {
   return enabled;
 }
 
+/* Make hpobs log as "rr detach: ...". Idempotent; called from the entry
+ * points that use hpobs. */
+inline void detach_init_logging() {
+  static bool done = false;
+  if (!done) {
+    hpobs::set_log_prefix("rr detach");
+    done = true;
+  }
+}
+
 // Everything a replay point carries besides the ReplaySession itself: the
 // models of kernel state recreated at hand-off (fds, signals, checks) and the
 // watched functions with their hit counts. A checkpoint keeps a snapshot; a
@@ -32,7 +43,7 @@ struct ReplayModels {
   FdModel fd;
   SignalModel sigs;
   DetachCheck check;
-  Watch watch;
+  hpobs::Watch watch;
 
   ReplayModels snapshot() const {
     return ReplayModels{ fd.snapshot(), sigs, check, watch };
@@ -42,10 +53,7 @@ struct ReplayModels {
     sigs.observe(frame, t);
     check.observe(frame, t);
   }
-  long hits_of(const std::string& sym) const {
-    auto h = watch.hits.find(sym);
-    return h == watch.hits.end() ? 0 : h->second;
-  }
+  int64_t hits_of(const std::string& sym) const { return watch.hits_of(sym); }
 };
 
 } // namespace rr

@@ -24,36 +24,36 @@ bool RrTaskTarget::read(uint64_t addr, void* buf, size_t len) {
   return ok;
 }
 
-obs::Regs RrTaskTarget::regs() {
-  obs::Regs r = {};
+hpobs::Regs RrTaskTarget::regs() {
+  hpobs::Regs r = {};
   if (!t_) {
     return r;
   }
   NativeArch::user_regs_struct u = t_->regs().get_ptrace();
-  r.gpr[obs::Regs::RAX] = u.rax;
-  r.gpr[obs::Regs::RDX] = u.rdx;
-  r.gpr[obs::Regs::RCX] = u.rcx;
-  r.gpr[obs::Regs::RBX] = u.rbx;
-  r.gpr[obs::Regs::RSI] = u.rsi;
-  r.gpr[obs::Regs::RDI] = u.rdi;
-  r.gpr[obs::Regs::RBP] = u.rbp;
-  r.gpr[obs::Regs::RSP] = u.rsp;
-  r.gpr[obs::Regs::R8] = u.r8;
-  r.gpr[obs::Regs::R9] = u.r9;
-  r.gpr[obs::Regs::R10] = u.r10;
-  r.gpr[obs::Regs::R11] = u.r11;
-  r.gpr[obs::Regs::R12] = u.r12;
-  r.gpr[obs::Regs::R13] = u.r13;
-  r.gpr[obs::Regs::R14] = u.r14;
-  r.gpr[obs::Regs::R15] = u.r15;
-  r.gpr[obs::Regs::RIP] = u.rip;
+  r.gpr[hpobs::Regs::RAX] = u.rax;
+  r.gpr[hpobs::Regs::RDX] = u.rdx;
+  r.gpr[hpobs::Regs::RCX] = u.rcx;
+  r.gpr[hpobs::Regs::RBX] = u.rbx;
+  r.gpr[hpobs::Regs::RSI] = u.rsi;
+  r.gpr[hpobs::Regs::RDI] = u.rdi;
+  r.gpr[hpobs::Regs::RBP] = u.rbp;
+  r.gpr[hpobs::Regs::RSP] = u.rsp;
+  r.gpr[hpobs::Regs::R8] = u.r8;
+  r.gpr[hpobs::Regs::R9] = u.r9;
+  r.gpr[hpobs::Regs::R10] = u.r10;
+  r.gpr[hpobs::Regs::R11] = u.r11;
+  r.gpr[hpobs::Regs::R12] = u.r12;
+  r.gpr[hpobs::Regs::R13] = u.r13;
+  r.gpr[hpobs::Regs::R14] = u.r14;
+  r.gpr[hpobs::Regs::R15] = u.r15;
+  r.gpr[hpobs::Regs::RIP] = u.rip;
   r.fs_base = u.fs_base;
   r.gs_base = u.gs_base;
   return r;
 }
 
-vector<obs::Mapping> RrTaskTarget::maps() {
-  vector<obs::Mapping> out;
+vector<hpobs::Mapping> RrTaskTarget::maps() {
+  vector<hpobs::Mapping> out;
   AddressSpace* vm = t_ ? t_->vm().get() : vm_.get();
   if (!vm) {
     return out;
@@ -66,8 +66,11 @@ vector<obs::Mapping> RrTaskTarget::maps() {
   return out;
 }
 
-const void* RrTaskTarget::address_space_id() {
-  return t_ ? t_->vm().get() : vm_.get();
+// An AddressSpace is unique while it lives and a replay never reuses one
+// for another image, so its identity serves as the id.
+uint64_t RrTaskTarget::address_space_id() {
+  AddressSpace* vm = t_ ? t_->vm().get() : vm_.get();
+  return reinterpret_cast<uintptr_t>(vm);
 }
 
 bool RrTaskTarget::add_breakpoint(uint64_t addr) {
@@ -80,13 +83,13 @@ void RrTaskTarget::remove_breakpoint(uint64_t addr) {
   }
 }
 
-obs::StepStatus RrTaskTarget::step() {
+hpobs::StepStatus RrTaskTarget::step() {
   auto result = s_.replay_step(RUN_SINGLESTEP);
   t_ = s_.current_task();
   if (result.status == REPLAY_EXITED || !t_) {
-    return obs::StepStatus::Exited;
+    return hpobs::StepStatus::Exited;
   }
-  return obs::StepStatus::Stopped;
+  return hpobs::StepStatus::Stopped;
 }
 
 } // namespace rr

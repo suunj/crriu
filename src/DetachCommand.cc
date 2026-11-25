@@ -209,11 +209,17 @@ static int branch_from(ReplaySession& src, const ReplayModels& models,
 static int detach_cached(ReplaySession::shr_ptr session, ReplayModels& live,
                          const DetachFlags& flags) {
   CheckpointStore store(flags.cache_max);
-  Watch& watch = live.watch;
+  hpobs::Watch& watch = live.watch;
 
   vector<Target> targets;
   for (const string& spec : flags.dumps)
-      watch.dumps.push_back(parse_dump(spec));
+      {
+    hpobs::Dump d;
+    if (!hpobs::parse_dump(spec, &d)) {
+      return 1;
+    }
+    watch.dumps.push_back(d);
+  }
   watch.dump_dir = flags.output_dir.empty() ? "crriu-dumps" : flags.output_dir;
   watch.track_exits = flags.exits;
   watch.from_event = flags.from_event;
@@ -336,7 +342,7 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     cwd.assign(buf, n);
     fprintf(stderr, "rr detach: assuming recording cwd %s; pass --cwd if different\n", cwd.c_str());
   }
-  ReplayModels live{ FdModel(cwd), SignalModel(), DetachCheck(), Watch() };
+  ReplayModels live{ FdModel(cwd), SignalModel(), DetachCheck(), hpobs::Watch() };
   live.fd.init_task(session->current_task());
   session->on_task_cloned = [&](Task* parent, Task* child, int flags) {
     live.fd.fork_task(parent, child, flags);

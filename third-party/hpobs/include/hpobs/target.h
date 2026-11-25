@@ -1,7 +1,7 @@
 /* -*- Mode: C++; tab-width: 8; c-basic-offset: 2; indent-tabs-mode: nil; -*- */
 
-#ifndef RR_OBSERVE_TARGET_H_
-#define RR_OBSERVE_TARGET_H_
+#ifndef HPOBS_TARGET_H_
+#define HPOBS_TARGET_H_
 
 #include <stdint.h>
 #include <sys/mman.h>
@@ -10,8 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace rr {
-namespace obs {
+namespace hpobs {
 
 // One mapping of the target's address space.
 struct Mapping {
@@ -23,17 +22,14 @@ struct Mapping {
 
   // An executable mapping of a file on disk: the only kind symbols are
   // looked up in.
-  bool exec_file() const {
-    return (prot & PROT_EXEC) && !fsname.empty() && fsname[0] == '/';
-  }
+  bool exec_file() const { return (prot & PROT_EXEC) && !fsname.empty() && fsname[0] == '/'; }
 };
 
 // General-purpose registers in x86-64 DWARF numbering, which gdb and the
 // remote protocol use too: 0 rax 1 rdx 2 rcx 3 rbx 4 rsi 5 rdi 6 rbp 7 rsp
 // 8-15 r8-r15 16 rip.
 struct Regs {
-  enum { RAX, RDX, RCX, RBX, RSI, RDI, RBP, RSP,
-         R8, R9, R10, R11, R12, R13, R14, R15, RIP, NGPR };
+  enum { RAX, RDX, RCX, RBX, RSI, RDI, RBP, RSP, R8, R9, R10, R11, R12, R13, R14, R15, RIP, NGPR };
   uint64_t gpr[NGPR];
   uint64_t fs_base;
   uint64_t gs_base;
@@ -43,7 +39,7 @@ struct Regs {
   uint64_t ax() const { return gpr[RAX]; }
   // SysV integer argument i (0-5): rdi rsi rdx rcx r8 r9.
   uint64_t arg(int i) const {
-    static const int order[6] = { RDI, RSI, RDX, RCX, R8, R9 };
+    static const int order[6] = {RDI, RSI, RDX, RCX, R8, R9};
     return gpr[order[i]];
   }
 };
@@ -52,9 +48,8 @@ enum class StepStatus { Stopped, Exited };
 
 // A stopped thread we can observe and nudge: read its memory and registers,
 // list its mappings, plant breakpoints and single-step it. This is all the
-// symbol, watch and access-trace code needs, and none of it is rr-specific:
-// a plain ptrace target or a gdb remote stub can implement it as well as a
-// replay task.
+// symbol, watch and access-trace code needs. A ptrace'd process, a task of
+// an rr replay and a gdb remote stub can all implement it.
 class Target {
 public:
   virtual ~Target() = default;
@@ -67,8 +62,8 @@ public:
   virtual std::vector<Mapping> maps() = 0;
 
   // Identifies the address space: symbols resolved under one id stay valid
-  // while the id stays the same.
-  virtual const void* address_space_id() = 0;
+  // while the id stays the same. Changes on exec.
+  virtual uint64_t address_space_id() = 0;
 
   // Software breakpoints. add_breakpoint returns true if one was installed.
   virtual bool add_breakpoint(uint64_t addr) = 0;
@@ -78,7 +73,6 @@ public:
   virtual StepStatus step() = 0;
 };
 
-} // namespace obs
-} // namespace rr
+}  // namespace hpobs
 
-#endif /* RR_OBSERVE_TARGET_H_ */
+#endif /* HPOBS_TARGET_H_ */

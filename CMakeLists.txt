@@ -673,14 +673,11 @@ set(RR_SOURCES
   src/ReplayTimeline.cc
   src/RerunCommand.cc
   src/DetachCommand.cc
-  src/DetachAccessTrace.cc
   src/DetachCheck.cc
   src/DetachCheckpointStore.cc
   src/DetachHandOff.cc
   src/DetachReplay.cc
-  src/DetachSymbols.cc
   src/DetachTarget.cc
-  src/DetachWatch.cc
   src/RrTaskTarget.cc
   src/FdModel.cc
   src/SignalModel.cc
@@ -794,15 +791,10 @@ if(intel_pt_decoding)
 endif()
 
 # Optional: instruction decoding for `rr detach -x` (memory access sets).
-pkg_check_modules(CAPSTONE capstone)
-if(CAPSTONE_FOUND)
-  target_include_directories(rr PRIVATE ${CAPSTONE_INCLUDE_DIRS})
-  target_compile_definitions(rr PRIVATE HAVE_CAPSTONE=1)
-  target_link_libraries(rr ${CAPSTONE_LDFLAGS})
-  message(STATUS "capstone ${CAPSTONE_VERSION}: rr detach -x enabled")
-else()
-  message(STATUS "capstone not found: rr detach -x disabled")
-endif()
+# Function watching, memory dumps and access tracing for `rr detach`;
+# capstone is detected in there.
+add_subdirectory(third-party/hpobs)
+target_link_libraries(rr hpobs)
 
 if(LIBRT)
   target_link_libraries(rr ${LIBRT})

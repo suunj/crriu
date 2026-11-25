@@ -3,9 +3,6 @@
 #ifndef RR_DETACH_TARGET_H_
 #define RR_DETACH_TARGET_H_
 
-#include <stddef.h>
-#include <stdint.h>
-
 #include <string>
 
 #include "TraceFrame.h"
@@ -24,20 +21,6 @@ struct Target {
 
 // EVENT or SYM[:N].
 Target parse_target(const std::string& spec);
-
-// -d NAME:ADDR:LEN[:EVERY[:FROM]]: a memory range to snapshot at symbol hits,
-// so that successive snapshots can be diffed to see what the program itself
-// changed between two hits (rr records only what the kernel wrote).
-struct Dump {
-  std::string name;
-  uintptr_t addr;
-  size_t len;
-  long every;
-  long from = 1; // first hit to dump
-};
-
-// Exits with an error message if `spec` is malformed.
-Dump parse_dump(const std::string& spec);
 
 } // namespace rr
 
