@@ -3,6 +3,8 @@
 #ifndef RR_DETACH_MODELS_H_
 #define RR_DETACH_MODELS_H_
 
+#include <stdlib.h>
+
 #include <string>
 
 #include "DetachCheck.h"
@@ -14,6 +16,13 @@ namespace rr {
 
 class Task;
 class TraceFrame;
+
+/* True when CRRIU_TRACE is set: `rr detach` logs every replayed frame,
+ * watched-function hit and hand-off to stderr. */
+inline bool detach_trace_enabled() {
+  static bool enabled = getenv("CRRIU_TRACE") != nullptr;
+  return enabled;
+}
 
 // Everything a replay point carries besides the ReplaySession itself: the
 // models of kernel state recreated at hand-off (fds, signals, checks) and the

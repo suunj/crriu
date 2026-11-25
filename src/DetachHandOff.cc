@@ -20,6 +20,7 @@
 #include "AddressSpace.h"
 #include "AutoRemoteSyscalls.h"
 #include "DetachSymbols.h"
+#include "RrTaskTarget.h"
 #include "FdTable.h"
 #include "ReplayTask.h"
 #include "core.h"
@@ -30,6 +31,12 @@
 using namespace std;
 
 namespace rr {
+
+// An executable mapping of a file on disk: the only kind rr patches code in.
+static bool is_exec_file_mapping(const KernelMapping& km) {
+  return (km.prot() & PROT_EXEC) && !km.fsname().empty() &&
+         km.fsname()[0] == '/';
+}
 
 // rr patches code in the tracee while it replays (syscall buffering hooks and
 // the like). Put back the bytes of the files the code was mapped from, so
@@ -251,10 +258,11 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
     static SymbolMaps symbols;
     for (Task* t : tasks) {
       const Registers& r = t->regs();
-      symbols.build(t);
+      RrTaskTarget tgt(session, t);
+      symbols.build(tgt);
       fprintf(stderr, "handoff tid %d rec_tid %d ip %#lx (%s) sp %#lx arg1 %#lx arg2 %#lx arg3 %#lx\n",
               t->tid, t->rec_tid, (unsigned long)r.ip().register_value(),
-              symbols.lookup(t, r.ip()).c_str(), (unsigned long)r.sp().as_int(),
+              symbols.lookup(tgt, r.ip().register_value()).c_str(), (unsigned long)r.sp().as_int(),
               (unsigned long)r.arg1(), (unsigned long)r.arg2(), (unsigned long)r.arg3());
 
       const struct { const char* name; uintptr_t addr; } spots[] = {

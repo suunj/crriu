@@ -681,6 +681,7 @@ set(RR_SOURCES
   src/DetachSymbols.cc
   src/DetachTarget.cc
   src/DetachWatch.cc
+  src/RrTaskTarget.cc
   src/FdModel.cc
   src/SignalModel.cc
   src/ReturnAddressList.cc
