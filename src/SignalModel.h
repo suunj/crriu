@@ -4,7 +4,8 @@
 #include <map>
 #include <sys/types.h>
 namespace rr {
-class Task; class TraceFrame;
+class Task;
+class TraceFrame;
 
 /**
  * Tracks signal state replay never applies to the kernel: per-thread
@@ -15,11 +16,15 @@ class SignalModel {
 public:
   void observe(const TraceFrame& frame, Task* t);
   bool materialize(Task* t);
+
 private:
-  struct Action { uint64_t handler = 0, flags = 0, restorer = 0, mask = 0; bool set = false; };
-  std::map<pid_t, uint64_t> blocked;   // rec_tid -> sigmask
+  struct Action {
+    uint64_t handler = 0, flags = 0, restorer = 0, mask = 0;
+    bool set = false;
+  };
+  std::map<pid_t, uint64_t> blocked; // rec_tid -> sigmask
   Action actions[65];
   int64_t last_time = -1;
 };
-}
+} // namespace rr
 #endif

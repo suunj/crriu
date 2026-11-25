@@ -51,15 +51,21 @@ DetachCommand DetachCommand::singleton(
     "  -o, --output-dir=DIR       per-branch stdio: DIR/branch-K.stdin (FIFO)\n"
     "                             and DIR/branch-K.log\n"
     "  -c, --cwd=DIR              cwd of the recording (default: current)\n"
-    "  -s, --strict               refuse to branch where state can't be restored\n"
+    "  -s, --strict               refuse to branch where state can't be "
+    "restored\n"
     "  -k, --checkpoint=EVENT     also keep a checkpoint at EVENT\n"
     "  -y, --cache-every=N        checkpoint every N events while replaying\n"
-    "  -m, --cache-max=N          checkpoints kept besides the base (default 4)\n"
+    "  -m, --cache-max=N          checkpoints kept besides the base (default "
+    "4)\n"
     "  -e, --exits                also stop where each watched call returns:\n"
-    "                             log the return value, dump NAME.SYM.N.exit.bin\n"
-    "  -f, --from=EVENT           replay natively (no breakpoints, no hit counting)\n"
-    "                             until trace event EVENT, then start watching\n"
-    "  -x, --access=SYM[:EVERY]   single-step every EVERY-th call of SYM to its\n"
+    "                             log the return value, dump "
+    "NAME.SYM.N.exit.bin\n"
+    "  -f, --from=EVENT           replay natively (no breakpoints, no hit "
+    "counting)\n"
+    "                             until trace event EVENT, then start "
+    "watching\n"
+    "  -x, --access=SYM[:EVERY]   single-step every EVERY-th call of SYM to "
+    "its\n"
     "                             return, logging each memory read/write to\n"
     "                             DIR/access.SYM.N.txt (needs capstone)\n"
     "  -d, --dump-mem=NAME:ADDR:LEN[:EVERY[:FROM]]\n"
@@ -74,15 +80,16 @@ struct DetachFlags {
   bool strict;
   string output_dir;
   int clones;
-  string checkpoint;            // -k
-  vector<string> resume_to;     // -r
+  string checkpoint;        // -k
+  vector<string> resume_to; // -r
   FrameTime cache_every;
   size_t cache_max;
-  vector<string> dumps;         // -d
-  bool exits;                   // -e
-  vector<string> access;        // -x
-  long from_event = 0;          // -f
-  DetachFlags() : strict(false), clones(1), cache_every(0), cache_max(4), exits(false) {}
+  vector<string> dumps;  // -d
+  bool exits;            // -e
+  vector<string> access; // -x
+  long from_event = 0;   // -f
+  DetachFlags()
+      : strict(false), clones(1), cache_every(0), cache_max(4), exits(false) {}
 };
 
 static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
@@ -90,18 +97,12 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
     return true;
   }
   static const OptionSpec options[] = {
-    { 'c', "cwd", HAS_PARAMETER },
-    { 's', "strict", NO_PARAMETER },
-    { 'o', "output-dir", HAS_PARAMETER },
-    { 'n', "clones", HAS_PARAMETER },
-    { 'k', "checkpoint", HAS_PARAMETER },
-    { 'r', "resume-to", HAS_PARAMETER },
-    { 'y', "cache-every", HAS_PARAMETER },
-    { 'm', "cache-max", HAS_PARAMETER },
-    { 'd', "dump-mem", HAS_PARAMETER },
-    { 'e', "exits", NO_PARAMETER },
-    { 'x', "access", HAS_PARAMETER },
-    { 'f', "from", HAS_PARAMETER }
+    { 'c', "cwd", HAS_PARAMETER },         { 's', "strict", NO_PARAMETER },
+    { 'o', "output-dir", HAS_PARAMETER },  { 'n', "clones", HAS_PARAMETER },
+    { 'k', "checkpoint", HAS_PARAMETER },  { 'r', "resume-to", HAS_PARAMETER },
+    { 'y', "cache-every", HAS_PARAMETER }, { 'm', "cache-max", HAS_PARAMETER },
+    { 'd', "dump-mem", HAS_PARAMETER },    { 'e', "exits", NO_PARAMETER },
+    { 'x', "access", HAS_PARAMETER },      { 'f', "from", HAS_PARAMETER }
   };
   ParsedOption opt;
   if (!Command::parse_option(args, options, &opt)) {
@@ -127,13 +128,15 @@ static bool parse_detach_arg(vector<string>& args, DetachFlags& flags) {
       flags.resume_to.push_back(opt.value);
       break;
     case 'y':
-      if (!opt.verify_valid_int(1, INT64_MAX))
-          return false;
+      if (!opt.verify_valid_int(1, INT64_MAX)) {
+        return false;
+      }
       flags.cache_every = opt.int_value;
       break;
     case 'm':
-      if (!opt.verify_valid_int(1, 1024))
-          return false;
+      if (!opt.verify_valid_int(1, 1024)) {
+        return false;
+      }
       flags.cache_max = opt.int_value;
       break;
     case 'd':
@@ -173,7 +176,8 @@ static void wait_for_stop() {
     sigsuspend(&old);
   }
   sigprocmask(SIG_SETMASK, &old, nullptr);
-  fprintf(stderr, "rr detach: exiting; branches stay, checkpoints are killed\n");
+  fprintf(stderr,
+          "rr detach: exiting; branches stay, checkpoints are killed\n");
 }
 
 // Clone `src` (a checkpoint or the live replay) with its models, replay the
@@ -183,25 +187,29 @@ static int branch_from(ReplaySession& src, const ReplayModels& models,
                        const Target& target, const DetachFlags& flags,
                        size_t branch_no, const char* how) {
   ReplaySession::shr_ptr b = src.clone();
-  ReplayModels m = models.snapshot();          // counting continues from here
+  ReplayModels m = models.snapshot(); // counting continues from here
   FrameTime at = src.trace_reader().time() - 1;
   bool ahead = target.by_event() ? target.event > at
                                  : m.hits_of(target.symbol) < target.hit;
   if (ahead) {
     at = run_until(*b, m, target, nullptr, 0);
     if (at < 0) {
-      fprintf(stderr, "rr detach: trace ended before '%s'\n", target.text.c_str());
+      fprintf(stderr, "rr detach: trace ended before '%s'\n",
+              target.text.c_str());
       return 1;
     }
   }
   ScopedFd bin, bout;
   string stdio_note;
-  if (!open_branch_stdio(flags.output_dir, branch_no, m.fd, bin, bout, stdio_note))
+  if (!open_branch_stdio(flags.output_dir, branch_no, m.fd, bin, bout,
+                         stdio_note)) {
     return 1;
+  }
   char tag[PATH_MAX + 96];
-  snprintf(tag, sizeof tag, " [branch %zu: '%s' %s]%s", branch_no, target.text.c_str(), how,
-           stdio_note.c_str());
-  int rc = hand_off(*b, m, flags.strict, at, tag);   // hand_off ends with forget_tasks()
+  snprintf(tag, sizeof tag, " [branch %zu: '%s' %s]%s", branch_no,
+           target.text.c_str(), how, stdio_note.c_str());
+  int rc = hand_off(*b, m, flags.strict, at,
+                    tag); // hand_off ends with forget_tasks()
   m.fd.clear_stdio_targets();
   return rc;
 }
@@ -212,8 +220,7 @@ static int detach_cached(ReplaySession::shr_ptr session, ReplayModels& live,
   hpobs::Watch& watch = live.watch;
 
   vector<Target> targets;
-  for (const string& spec : flags.dumps)
-      {
+  for (const string& spec : flags.dumps) {
     hpobs::Dump d;
     if (!hpobs::parse_dump(spec, &d)) {
       return 1;
@@ -226,7 +233,9 @@ static int detach_cached(ReplaySession::shr_ptr session, ReplayModels& live,
   for (const string& spec : flags.access) {
     size_t colon = spec.rfind(':');
     string sym = colon == string::npos ? spec : spec.substr(0, colon);
-    long every = colon == string::npos ? 1 : strtol(spec.c_str() + colon + 1, nullptr, 10);
+    long every = colon == string::npos
+                     ? 1
+                     : strtol(spec.c_str() + colon + 1, nullptr, 10);
     watch.access_every[sym] = every < 1 ? 1 : every;
     watch.symbols.push_back(sym);
   }
@@ -234,12 +243,15 @@ static int detach_cached(ReplaySession::shr_ptr session, ReplayModels& live,
   Target ckpt;
   if (!flags.checkpoint.empty()) {
     ckpt = parse_target(flags.checkpoint);
-    if (!ckpt.by_event())
-        watch.symbols.push_back(ckpt.symbol);
+    if (!ckpt.by_event()) {
+      watch.symbols.push_back(ckpt.symbol);
+    }
   }
   for (const string& spec : flags.resume_to) {
     targets.push_back(parse_target(spec));
-    if (!targets.back().by_event()) watch.symbols.push_back(targets.back().symbol);
+    if (!targets.back().by_event()) {
+      watch.symbols.push_back(targets.back().symbol);
+    }
   }
   store.set_pending(targets);
   std::sort(watch.symbols.begin(), watch.symbols.end());
@@ -248,10 +260,13 @@ static int detach_cached(ReplaySession::shr_ptr session, ReplayModels& live,
 
   // Base checkpoint: first clone-safe point after the recorded program
   // exec'd. Every "behind" request can at worst start from here.
-  session->on_task_cloned = [&](Task* p, Task* c, int f) { live.fd.fork_task(p, c, f); };
+  session->on_task_cloned = [&](Task* p, Task* c, int f) {
+    live.fd.fork_task(p, c, f);
+  };
   while (!(session->done_initial_exec() && session->can_clone())) {
-    if (Task* cur = session->current_task())
+    if (Task* cur = session->current_task()) {
       live.observe(session->current_trace_frame(), cur);
+    }
     if (session->replay_step(RUN_CONTINUE).status == REPLAY_EXITED) {
       fprintf(stderr, "rr detach: trace ended before the program exec'd\n");
       return 1;
@@ -277,7 +292,8 @@ static int detach_cached(ReplaySession::shr_ptr session, ReplayModels& live,
   size_t branch_no = 1;
   for (const Target& t : targets) {
     FrameTime pos = session->trace_reader().time() - 1;
-    bool behind = t.by_event() ? t.event <= pos : live.hits_of(t.symbol) >= t.hit;
+    bool behind =
+        t.by_event() ? t.event <= pos : live.hits_of(t.symbol) >= t.hit;
     ReplaySession* src = session.get();
     const ReplayModels* models = &live;
     char how[64] = "from the replay";
@@ -285,7 +301,8 @@ static int detach_cached(ReplaySession::shr_ptr session, ReplayModels& live,
     if (behind) {
       Checkpoint* c = store.nearest_before(t);
       if (!c) {
-        fprintf(stderr, "rr detach: '%s' is before the base checkpoint\n", t.text.c_str());
+        fprintf(stderr, "rr detach: '%s' is before the base checkpoint\n",
+                t.text.c_str());
         return 1;
       }
       src = c->session.get();
@@ -297,18 +314,21 @@ static int detach_cached(ReplaySession::shr_ptr session, ReplayModels& live,
         fprintf(stderr, "rr detach: trace ended before '%s'\n", t.text.c_str());
         return 1;
       }
-      if (t.by_event())                       // a function entry is mid-frame
+      if (t.by_event()) { // a function entry is mid-frame
         store.take(*session, live, at);
+      }
     }
     for (int k = 0; k < flags.clones; k++, branch_no++) {
       int rc = branch_from(*src, *models, t, flags, branch_no, how);
-      if (rc)
+      if (rc) {
         return rc;
+      }
     }
     store.pop_pending();
   }
 
-  fprintf(stderr, "rr detach: %zu branch(es); %zu checkpoint(s) kept:\n", branch_no - 1, store.size());
+  fprintf(stderr, "rr detach: %zu branch(es); %zu checkpoint(s) kept:\n",
+          branch_no - 1, store.size());
   store.list(stderr);
   wait_for_stop();
   return 0;
@@ -323,13 +343,12 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
   ReplaySession::shr_ptr session =
       ReplaySession::create(trace_dir, session_flags);
 
-  //FdModel model(session->trace_reader().initial_cwd());
+  // FdModel model(session->trace_reader().initial_cwd());
   string cwd = flags.cwd;
   if (!cwd.empty() && cwd[0] != '/') {
-    fprintf(stderr,
-            "rr detach: --cwd requires an absolute path\n");
+    fprintf(stderr, "rr detach: --cwd requires an absolute path\n");
     return 1;
- }
+  }
 
   if (cwd.empty()) {
     char link[64], buf[PATH_MAX];
@@ -337,12 +356,17 @@ static int detach(const string& trace_dir, const DetachFlags& flags) {
     ssize_t n = readlink(link, buf, sizeof buf - 1);
 
     if (n < 0) {
-      fprintf(stderr, "rr detach: can't read tracee cwd: %s\n", strerror(errno)); return 1;
+      fprintf(stderr, "rr detach: can't read tracee cwd: %s\n",
+              strerror(errno));
+      return 1;
     }
     cwd.assign(buf, n);
-    fprintf(stderr, "rr detach: assuming recording cwd %s; pass --cwd if different\n", cwd.c_str());
+    fprintf(stderr,
+            "rr detach: assuming recording cwd %s; pass --cwd if different\n",
+            cwd.c_str());
   }
-  ReplayModels live{ FdModel(cwd), SignalModel(), DetachCheck(), hpobs::Watch() };
+  ReplayModels live{ FdModel(cwd), SignalModel(), DetachCheck(),
+                     hpobs::Watch() };
   live.fd.init_task(session->current_task());
   session->on_task_cloned = [&](Task* parent, Task* child, int flags) {
     live.fd.fork_task(parent, child, flags);
@@ -356,7 +380,7 @@ int DetachCommand::run(vector<string>& args) {
   while (parse_detach_arg(args, flags)) {
   }
   if (flags.checkpoint.empty() && flags.resume_to.empty()) {
-      print_help(stderr);
+    print_help(stderr);
     return 1;
   }
   string trace_dir;

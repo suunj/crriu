@@ -11,7 +11,8 @@ using namespace std;
 
 namespace rr {
 
-bool CheckpointStore::take(ReplaySession& s, const ReplayModels& m, FrameTime time) {
+bool CheckpointStore::take(ReplaySession& s, const ReplayModels& m,
+                           FrameTime time) {
   if (by_time_.count(time)) {
     return false;
   }
@@ -25,7 +26,9 @@ bool CheckpointStore::take(ReplaySession& s, const ReplayModels& m, FrameTime ti
 
 Checkpoint* CheckpointStore::nearest_before(const Target& t) {
   Checkpoint* c = find_before(t);
-  if (c) c->last_used = ++tick_;
+  if (c) {
+    c->last_used = ++tick_;
+  }
   return c;
 }
 
@@ -47,12 +50,15 @@ Checkpoint* CheckpointStore::find_before(const Target& t) {
     } else {
       ok = c.models.hits_of(t.symbol) < t.hit;
     }
-    if (ok) best = &c;
+    if (ok) {
+      best = &c;
+    }
   }
   return best;
 }
 
-set<FrameTime> CheckpointStore::pinned(FrameTime pos, const map<string, int64_t>& hits) {
+set<FrameTime> CheckpointStore::pinned(FrameTime pos,
+                                       const map<string, int64_t>& hits) {
   set<FrameTime> keep;
   for (const Target& t : pending_) {
     auto h = hits.find(t.symbol);
@@ -76,16 +82,17 @@ void CheckpointStore::evict(FrameTime pos, const map<string, int64_t>& hits) {
       if (keep.count(it->first)) {
         continue;
       }
-      if (victim == by_time_.end() || it->second.last_used < victim->second.last_used) {
+      if (victim == by_time_.end() ||
+          it->second.last_used < victim->second.last_used) {
         victim = it;
       }
     }
     if (victim == by_time_.end()) {
-      break;     // everything left is pinned
+      break; // everything left is pinned
     }
     fprintf(stderr, "rr detach: evicting checkpoint at event %lld\n",
             (long long)victim->first);
-    by_time_.erase(victim);             // ~ReplaySession: tasks killed, emufs freed
+    by_time_.erase(victim); // ~ReplaySession: tasks killed, emufs freed
   }
 }
 

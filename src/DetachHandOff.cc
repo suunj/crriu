@@ -19,11 +19,11 @@
 
 #include "AddressSpace.h"
 #include "AutoRemoteSyscalls.h"
-#include "RrTaskTarget.h"
-#include "hpobs/symbols.h"
 #include "FdTable.h"
 #include "ReplayTask.h"
+#include "RrTaskTarget.h"
 #include "core.h"
+#include "hpobs/symbols.h"
 #include "log.h"
 #include "preload/preload_interface.h"
 #include "rr/rr.h"
@@ -91,12 +91,14 @@ bool open_branch_stdio(const string& dir, size_t k, FdModel& model,
   if (stat(fifo.c_str(), &st) < 0 || !S_ISFIFO(st.st_mode)) {
     unlink(fifo.c_str());
     if (mkfifo(fifo.c_str(), 0600) < 0) {
-      fprintf(stderr, "rr detach: mkfifo %s: %s\n", fifo.c_str(), strerror(errno));
+      fprintf(stderr, "rr detach: mkfifo %s: %s\n", fifo.c_str(),
+              strerror(errno));
       return false;
     }
   }
   in = ScopedFd(open(fifo.c_str(), O_RDWR | O_CLOEXEC));
-  out = ScopedFd(open(log.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644));
+  out = ScopedFd(
+      open(log.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644));
   if (!in.is_open() || !out.is_open()) {
     fprintf(stderr, "rr detach: can't open %s: %s\n", base, strerror(errno));
     return false;
@@ -148,8 +150,7 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
   // Restore working directories before recreating file descriptors.
   for (Task* t : tasks) {
     if (!m.fd.apply_cwd(t)) {
-      fprintf(stderr,
-              "rr detach: failed to restore cwd for tid=%d\n",
+      fprintf(stderr, "rr detach: failed to restore cwd for tid=%d\n",
               t->rec_tid);
       return 1;
     }
@@ -163,8 +164,7 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
     }
 
     if (!m.fd.materialize(t)) {
-      fprintf(stderr,
-              "rr detach: failed to recreate fds for tid=%d\n",
+      fprintf(stderr, "rr detach: failed to recreate fds for tid=%d\n",
               t->rec_tid);
       return 1;
     }
@@ -209,12 +209,11 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
     {
       AutoRemoteSyscalls remote(t);
       for (int fd : rr_fds) {
-        long ret = remote.syscall(
-            syscall_number_for_close(t->arch()), fd);
+        long ret = remote.syscall(syscall_number_for_close(t->arch()), fd);
 
         if (ret < 0) {
-          fprintf(stderr, "tid %d: close(%d) failed: %s\n",
-                  t->tid, fd, strerror(-ret));
+          fprintf(stderr, "tid %d: close(%d) failed: %s\n", t->tid, fd,
+                  strerror(-ret));
           close_failures++;
         } else {
           LOG(debug) << "tid " << t->tid << ": closed rr fd " << fd;
@@ -227,8 +226,7 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
   }
 
   if (close_failures) {
-    fprintf(stderr,
-            "rr detach: %d rr fd(s) could not be closed\n",
+    fprintf(stderr, "rr detach: %d rr fd(s) could not be closed\n",
             close_failures);
     return 1;
   }
@@ -241,7 +239,8 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
     if (unpatched.insert(t->vm().get()).second) {
       restore_patched_code(t);
     }
-    t->write_mem(remote_ptr<unsigned char>(RR_PAGE_IN_REPLAY_FLAG), (unsigned char)0);
+    t->write_mem(remote_ptr<unsigned char>(RR_PAGE_IN_REPLAY_FLAG),
+                 (unsigned char)0);
 
     t->reenable_cpuid_tsc();
 
@@ -249,10 +248,11 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
     // parked in a syscall-entry stop; clearing orig_rax stops the kernel
     // from treating the detach as a syscall return (which would clobber rax).
     Registers regs = t->regs();
-    if (regs.syscall_result_signed() == -ENOSYS && regs.original_syscallno() >= 0) {
+    if (regs.syscall_result_signed() == -ENOSYS &&
+        regs.original_syscallno() >= 0) {
 
       regs.set_syscall_result(regs.original_syscallno());
-      regs.set_ip(regs.ip() - 2);   // x86-64 `syscall` is 2 bytes
+      regs.set_ip(regs.ip() - 2); // x86-64 `syscall` is 2 bytes
 
       LOG(debug) << "tid " << t->tid << ": rewound to re-execute syscall "
                  << regs.original_syscallno();
@@ -273,10 +273,13 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
       const Registers& r = t->regs();
       RrTaskTarget tgt(session, t);
       symbols.build(tgt);
-      fprintf(stderr, "handoff tid %d rec_tid %d ip %#lx (%s) sp %#lx arg1 %#lx arg2 %#lx arg3 %#lx\n",
+      fprintf(stderr,
+              "handoff tid %d rec_tid %d ip %#lx (%s) sp %#lx arg1 %#lx arg2 "
+              "%#lx arg3 %#lx\n",
               t->tid, t->rec_tid, (unsigned long)r.ip().register_value(),
-              symbols.lookup(tgt, r.ip().register_value()).c_str(), (unsigned long)r.sp().as_int(),
-              (unsigned long)r.arg1(), (unsigned long)r.arg2(), (unsigned long)r.arg3());
+              symbols.lookup(tgt, r.ip().register_value()).c_str(),
+              (unsigned long)r.sp().as_int(), (unsigned long)r.arg1(),
+              (unsigned long)r.arg2(), (unsigned long)r.arg3());
 
       const TraceSpot spots[] = {
         { "ip", r.ip().register_value() },
@@ -290,8 +293,8 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
         t->read_bytes_helper(remote_ptr<void>(spot.addr), sizeof b, b, &ok);
         fprintf(stderr, "  mem[%s=%#lx]:", spot.name, (unsigned long)spot.addr);
         if (!ok) {
-            fprintf(stderr, " unreadable\n");
-            continue;
+          fprintf(stderr, " unreadable\n");
+          continue;
         }
         for (uint8_t x : b) {
           fprintf(stderr, " %02x", x);
@@ -304,8 +307,8 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
   // 4b. Release all tasks, stopped.
   for (Task* t : tasks) {
     errno = 0;
-    long r = t->fallible_ptrace(
-        PTRACE_DETACH, nullptr, (void*)(uintptr_t)SIGSTOP);
+    long r =
+        t->fallible_ptrace(PTRACE_DETACH, nullptr, (void*)(uintptr_t)SIGSTOP);
 
     LOG(debug) << "detach tid " << t->tid << ": ret=" << r;
 
@@ -317,8 +320,8 @@ int hand_off(ReplaySession& session, ReplayModels& m, bool strict,
 
   session.forget_tasks();
 
-  printf("detached pid %d after event %lld (%zu threads)%s\n",
-          real_pid, (long long)stopped_at, tasks.size(), tag);
+  printf("detached pid %d after event %lld (%zu threads)%s\n", real_pid,
+         (long long)stopped_at, tasks.size(), tag);
   fflush(stdout);
   return 0;
 }

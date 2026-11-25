@@ -16,7 +16,7 @@ Target parse_target(const string& spec) {
     return t;
   }
   size_t colon = spec.rfind(':');
-  if (colon != string::npos && colon > 2) {        // "sym:N" / "0x..:N", not "::"
+  if (colon != string::npos && colon > 2) { // "sym:N" / "0x..:N", not "::"
     t.hit = strtol(spec.c_str() + colon + 1, nullptr, 10);
     if (t.hit < 1) {
       t.hit = 1;

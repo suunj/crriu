@@ -2,9 +2,9 @@
 #ifndef RR_FD_MODEL_H_
 #define RR_FD_MODEL_H_
 
+#include <cstdint>
 #include <map>
 #include <memory>
-#include <cstdint>
 #include <string>
 
 #include "ScopedFd.h"
@@ -34,10 +34,10 @@ public:
   };
 
   struct EpollKeyLess {
-    bool operator()(const EpollKey& a,
-                    const EpollKey& b) const {
-      if (a.fd != b.fd)
+    bool operator()(const EpollKey& a, const EpollKey& b) const {
+      if (a.fd != b.fd) {
         return a.fd < b.fd;
+      }
 
       return std::owner_less<OpenFilePtr>()(a.file, b.file);
     }
@@ -61,11 +61,11 @@ public:
     };
     Type type = REGULAR;
 
-    std::string path;   // absolute
-    int flags = 0;          // as passed to open
+    std::string path; // absolute
+    int flags = 0;    // as passed to open
     int64_t offset = 0;
-    uint64_t counter = 0;  // EVENTFD
-    uint64_t sigmask = 0;  // SIGNALFD
+    uint64_t counter = 0; // EVENTFD
+    uint64_t sigmask = 0; // SIGNALFD
     bool seekable = true;
     int stdio_fd = -1;
 
@@ -98,24 +98,20 @@ public:
 
   const void* table_id(Task* t) const;
 
-  void forget_materialized() {
-      materialized_files.clear();
-  }
+  void forget_materialized() { materialized_files.clear(); }
 
-  void set_stdio_target(int fd, const ScopedFd* f) {
-      stdio_target[fd] = f;
-  }
+  void set_stdio_target(int fd, const ScopedFd* f) { stdio_target[fd] = f; }
 
   void clear_stdio_targets() {
-      stdio_target[0] = stdio_target[1] = stdio_target[2] = nullptr;
+    stdio_target[0] = stdio_target[1] = stdio_target[2] = nullptr;
   }
 
   std::shared_ptr<OpenFile> stdio_alias(int fd) {
-      auto f = std::make_shared<OpenFile>();
-      f->type = OpenFile::STDIO;
-      f->stdio_fd = fd;
-      f->origin = "dup of stdio " + std::to_string(fd);
-      return f;
+    auto f = std::make_shared<OpenFile>();
+    f->type = OpenFile::STDIO;
+    f->stdio_fd = fd;
+    f->origin = "dup of stdio " + std::to_string(fd);
+    return f;
   }
 
 private:
